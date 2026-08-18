@@ -1,0 +1,41 @@
+# netlify.toml for the NEW Content Studio site.
+#
+# Why this exists: the eight AI functions are deployed and running on the
+# original project-briefs site, but their source was on a machine that no
+# longer exists. They can't be redeployed, only reused.
+#
+# This proxies /api/* on the new site through to the old site's functions,
+# so the new front end can be redesigned and redeployed freely without ever
+# touching the deploy that holds them.
+#
+# Points at project-briefs.netlify.app, where the functions live.
+#
+# Repo layout this expects:
+#   /index.html      <- the Studio front end
+#   /netlify.toml    <- this file
+#
+# No functions directory. Nothing to bundle. Nothing to lose.
+
+[build]
+  publish = "."
+  command = ""
+
+# Proxy every API call to the original site's functions.
+# status = 200 makes it a transparent proxy rather than a browser redirect,
+# so the Authorization header (the Supabase JWT) is forwarded server-side and
+# the browser never sees a cross-origin request — no CORS involved.
+[[redirects]]
+  from = "/api/*"
+  to = "https://project-briefs.netlify.app/api/:splat"
+  status = 200
+  force = true
+
+# Streaming note: ai-refresher, ai-linkedin, ai-thread, ai-quote-cards,
+# ai-observations and ai-ideas stream their responses. If output arrives all
+# at once instead of progressively, the proxy is buffering — say so and we'll
+# switch that endpoint to a direct cross-origin call instead.
+
+[[headers]]
+  for = "/index.html"
+  [headers.values]
+    Cache-Control = "public, max-age=0, must-revalidate"
