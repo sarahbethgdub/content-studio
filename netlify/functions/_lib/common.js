@@ -38,6 +38,22 @@ export async function sbSelect(table, params = {}) {
   return r.json();
 }
 
+/** PostgREST caps every response at 1000 rows no matter what `limit` says,
+ *  so anything that must be COMPLETE has to be paged. Getting this wrong is
+ *  silent: you get a short list and treat it as the whole set. */
+export async function sbSelectAll(table, params = {}, page = 1000) {
+  const out = [];
+  for (let offset = 0; ; offset += page) {
+    const batch = await sbSelect(table, {
+      ...params, limit: String(page), offset: String(offset),
+    });
+    out.push(...batch);
+    if (batch.length < page) break;
+    if (offset > 200000) break;          // hard stop, should never trigger
+  }
+  return out;
+}
+
 export async function sbPatch(table, match, body) {
   const qs = new URLSearchParams(match).toString();
   const r = await fetch(`${SUPABASE_URL}/rest/v1/${table}?${qs}`, {
