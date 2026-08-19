@@ -217,7 +217,7 @@ async function embedSituations() {
 const MIN_CLUSTER_CHARS = 1200;
 const EXCLUDE_CATEGORIES = ["Site page", "Media", "Content Library", "Resources & Tools"];
 
-async function buildClusters(k = 14) {
+async function buildClusters(k = 18) {
   const rows = [];
   for (let off = 0; ; off += 250) {
     const page = await sbSelect("pieces", {
@@ -277,26 +277,40 @@ async function buildClusters(k = 14) {
     groups.push({ ci, members });
   }
 
-  const NAME_SYSTEM = `You label regions of a content library so a visitor can tell, at a glance, whether the thing they are dealing with lives in that region.
+  const NAME_SYSTEM = `You label regions of a business writing library.
 
-You will be shown the SITUATIONS that the pieces in one region address — phrases describing what a reader is going through.
+You will be shown the SITUATIONS the pieces in one region address — phrases describing what a reader is going through.
 
-The label must be RECOGNISABLE, not clever. A small business owner scanning fourteen labels should know within a second which one is theirs.
+A label names a MOMENT or a DECISION the reader is inside. It is not a subject heading.
 
-Good: "Before you sign something", "The conversation you're avoiding", "When what worked stops working", "Hiring people you'll rely on"
-Bad: "Risk before the bet", "Courage over comfort", "Trust before contact" — these are aphorisms. They sound good and communicate nothing.
+The failure to avoid is a topic label wearing friendly words. These are all WRONG:
+  "Hiring and managing your team"   (a department, not a moment)
+  "Buying or selling a business"    (a category)
+  "How you price what you sell"     (a subject heading)
+  "Running and growing the business" (means nothing)
+Also wrong, in the other direction — aphorisms that sound good and say nothing:
+  "Risk before the bet", "Courage over comfort"
+
+These are RIGHT, and came from this same library:
+  "The financial call you're sitting on"
+  "When things get weird at work"
+  "How your body actually works"
+
+Test before answering: could this label be a nav item on any consulting firm's website? If yes, it is wrong. Rewrite it as the moment the reader is in.
 
 Rules:
-- 3-6 words. Plain. Second person or a plain noun phrase.
-- Name the SITUATION or the DECISION, never the lesson or the virtue.
-- No abstractions: not "clarity", "courage", "discipline", "alignment", "trust".
-- The blurb is one sentence naming who this region is for and what they are trying to work out. Address them directly.
+- 4-7 words. Plain speech.
+- Name the moment, the decision, or the doubt. Never the domain.
+- No gerund-plus-noun department names ("Hiring and managing…", "Running and growing…").
+- No abstractions: clarity, courage, discipline, alignment, trust, excellence.
+- If two regions would get similar names, make each one narrower and more specific — do not settle for a vaguer label that covers both.
+- The blurb is one sentence addressed to the reader, naming what they are trying to work out.
 - Return JSON only.`;
 
   const named = await Promise.all(groups.map(async (g) => {
     if (!g.members.length) return null;
-    const sample = g.members.slice(0, 18).map((m) => {
-      const sits = (m.situations || []).slice(0, 2).join("; ");
+    const sample = g.members.slice(0, 24).map((m) => {
+      const sits = (m.situations || []).slice(0, 3).join("; ");
       return `- ${m.title}${sits ? `\n    situations: ${sits}` : ""}`;
     }).join("\n");
 
@@ -374,7 +388,7 @@ export default async (req) => {
     if (job === "pieces")     return json(await enrichPieces());
     if (job === "chunks")     return json(await backfillChunks(user.id));
     if (job === "situations") return json(await embedSituations());
-    if (job === "clusters")   return json(await buildClusters(body.k || 14));
+    if (job === "clusters")   return json(await buildClusters(Math.min(30, Math.max(4, body.k || 18))));
     return json({ error: `unknown job: ${job}` }, 400);
   } catch (e) {
     return json({ error: String(e).slice(0, 400) }, 500);
