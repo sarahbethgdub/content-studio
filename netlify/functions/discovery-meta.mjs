@@ -13,7 +13,7 @@ export default async (req) => {
         select: "slug,label", active: "is.true", order: "sort_order.asc",
       }),
       sbSelect("discovery_clusters", {
-        select: "id,name,blurb,x,y,colour,piece_count", order: "id.asc",
+        select: "id,name,blurb,x,y,colour,piece_count", order: "piece_count.desc",
       }),
       sbSelect("pieces", { select: "id", limit: "1" }),
     ]);
@@ -22,7 +22,7 @@ export default async (req) => {
     // layout is stable between loads without shipping any vectors.
     const pieces = await sbSelect("pieces", {
       select: "id,title,category,url,cluster_id,char_count",
-      cluster_id: "not.is.null", limit: "1000",
+      cluster_id: "not.is.null", order: "char_count.desc", limit: "1000",
     });
 
     const byCluster = {};
@@ -43,7 +43,15 @@ export default async (req) => {
       };
     }).filter(Boolean);
 
-    return json({ situations, clusters, points, total: pieces.length },
+    const samples = {};
+    for (const p of pieces) {
+      if (!p.cluster_id) continue;
+      (samples[p.cluster_id] = samples[p.cluster_id] || []);
+      if (samples[p.cluster_id].length < 3) samples[p.cluster_id].push(p.title);
+    }
+    const withSamples = clusters.map((c) => ({ ...c, samples: samples[c.id] || [] }));
+
+    return json({ situations, clusters: withSamples, points, total: pieces.length },
       200, { ...CORS, "Cache-Control": "public, max-age=600" });
   } catch (e) {
     return json({ error: String(e).slice(0, 300) }, 500, CORS);

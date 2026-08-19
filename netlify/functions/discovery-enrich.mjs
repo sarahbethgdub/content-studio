@@ -205,29 +205,42 @@ async function embedSituations() {
   return { embedded: sits.length };
 }
 
-/* k-means over the library embeddings, then Claude names the groups. */
-async function buildClusters(k = 5) {
-  // Paged: 689 x 1536 floats is a large response to pull in one go.
+/* k-means over the library embeddings, then Claude names each group from the
+   SITUATIONS of its members — not from titles or arguments. Naming from the
+   argument produced aphorisms ("Risk before the bet") that read well and told
+   a visitor nothing. Situations are already phrased as predicaments, which is
+   what a region label has to be: recognisable before you click.
+
+   Navigation and index pages are excluded. Left in, they formed their own
+   cluster of About/Team/Contact pages that Claude gamely named "Trust before
+   contact" — a real cluster of nothing. */
+const MIN_CLUSTER_CHARS = 1200;
+const EXCLUDE_CATEGORIES = ["Site page", "Media", "Content Library", "Resources & Tools"];
+
+async function buildClusters(k = 14) {
   const rows = [];
   for (let off = 0; ; off += 250) {
     const page = await sbSelect("pieces", {
-      select: "id,title,category,reader_note,embedding",
+      select: "id,title,category,reader_note,situations,char_count,embedding",
       embedding: "not.is.null",
       order: "id.asc", offset: String(off), limit: "250",
     });
     rows.push(...page);
     if (page.length < 250) break;
   }
-  if (rows.length < k * 4) throw new Error(`only ${rows.length} embedded pieces — too few to cluster`);
 
-  const vecs = rows.map((r) => parseVector(r.embedding));
+  const eligible = rows.filter((r) =>
+    (r.char_count || 0) >= MIN_CLUSTER_CHARS &&
+    !EXCLUDE_CATEGORIES.includes(r.category));
+
+  if (eligible.length < k * 4) throw new Error(`only ${eligible.length} eligible pieces for k=${k}`);
+
+  const vecs = eligible.map((r) => parseVector(r.embedding));
   const dim = vecs[0].length;
 
-  // Deterministic seeding so the map doesn't reshuffle on every run.
   let seed = 20260818;
   const rnd = () => (seed = (seed * 16807) % 2147483647) / 2147483647;
-  let centroids = [];
-  centroids.push(vecs[Math.floor(rnd() * vecs.length)]);
+  let centroids = [vecs[Math.floor(rnd() * vecs.length)]];
   while (centroids.length < k) {
     const d = vecs.map((v) => Math.min(...centroids.map((c) => 1 - cosine(v, c))));
     const total = d.reduce((a, b) => a + b, 0);
@@ -237,11 +250,11 @@ async function buildClusters(k = 5) {
   }
 
   let assign = new Array(vecs.length).fill(-1);
-  for (let iter = 0; iter < 25; iter++) {
+  for (let iter = 0; iter < 30; iter++) {
     let moved = 0;
     vecs.forEach((v, i) => {
       let best = 0, bestSim = -2;
-      centroids.forEach((c, ci) => { const s = cosine(v, c); if (s > bestSim) { bestSim = s; best = ci; } });
+      centroids.forEach((c, ci) => { const sim = cosine(v, c); if (sim > bestSim) { bestSim = sim; best = ci; } });
       if (assign[i] !== best) { assign[i] = best; moved++; }
     });
     centroids = centroids.map((_, ci) => {
@@ -254,10 +267,9 @@ async function buildClusters(k = 5) {
     if (!moved) break;
   }
 
-  // Name each group from its most central members. In parallel.
   const groups = [];
   for (let ci = 0; ci < k; ci++) {
-    const members = rows
+    const members = eligible
       .map((r, i) => ({ r, i }))
       .filter(({ i }) => assign[i] === ci)
       .map(({ r, i }) => ({ ...r, sim: cosine(vecs[i], centroids[ci]) }))
@@ -265,66 +277,87 @@ async function buildClusters(k = 5) {
     groups.push({ ci, members });
   }
 
+  const NAME_SYSTEM = `You label regions of a content library so a visitor can tell, at a glance, whether the thing they are dealing with lives in that region.
+
+You will be shown the SITUATIONS that the pieces in one region address — phrases describing what a reader is going through.
+
+The label must be RECOGNISABLE, not clever. A small business owner scanning fourteen labels should know within a second which one is theirs.
+
+Good: "Before you sign something", "The conversation you're avoiding", "When what worked stops working", "Hiring people you'll rely on"
+Bad: "Risk before the bet", "Courage over comfort", "Trust before contact" — these are aphorisms. They sound good and communicate nothing.
+
+Rules:
+- 3-6 words. Plain. Second person or a plain noun phrase.
+- Name the SITUATION or the DECISION, never the lesson or the virtue.
+- No abstractions: not "clarity", "courage", "discipline", "alignment", "trust".
+- The blurb is one sentence naming who this region is for and what they are trying to work out. Address them directly.
+- Return JSON only.`;
+
   const named = await Promise.all(groups.map(async (g) => {
-    const sample = g.members.slice(0, 14)
-      .map((m) => `- ${m.title}${m.reader_note ? ` — ${m.reader_note}` : ""}`).join("\n");
-    const out = parseJson(await claude(
-      `You name thematic regions of a business writing library. Names are 2-4 words, concrete, and describe the ARGUMENT the writing makes, not its topic. "Deciding late" not "Decision making". "Price and worth" not "Pricing". Return JSON only.`,
-      `These pieces cluster together:\n\n${sample}\n\nReturn: {"name": "...", "blurb": "one sentence on what this group of writing keeps arguing"}`,
-      300
-    ));
-    return { ci: g.ci, name: out.name, blurb: out.blurb, count: g.members.length };
+    if (!g.members.length) return null;
+    const sample = g.members.slice(0, 18).map((m) => {
+      const sits = (m.situations || []).slice(0, 2).join("; ");
+      return `- ${m.title}${sits ? `\n    situations: ${sits}` : ""}`;
+    }).join("\n");
+
+    const out = parseJson(await claude(NAME_SYSTEM,
+      `Pieces in this region:\n\n${sample}\n\nReturn: {"name": "...", "blurb": "..."}`, 300));
+    return { ci: g.ci, name: out.name, blurb: out.blurb, count: g.members.length,
+             samples: g.members.slice(0, 3).map((m) => m.title) };
   }));
 
-  // Lay the centroids out in 2D by pushing dissimilar ones apart.
-  const pts = centroids.map((_, i) => ({
-    x: 0.5 + 0.32 * Math.cos((i / k) * Math.PI * 2),
-    y: 0.5 + 0.30 * Math.sin((i / k) * Math.PI * 2),
+  const live = named.filter(Boolean);
+
+  // Lay centroids out in 2D, pushing dissimilar regions apart. More regions
+  // need more relaxation passes to stop labels piling up.
+  const pts = live.map((_, i) => ({
+    x: 0.5 + 0.34 * Math.cos((i / live.length) * Math.PI * 2),
+    y: 0.5 + 0.32 * Math.sin((i / live.length) * Math.PI * 2),
   }));
-  for (let step = 0; step < 240; step++) {
-    for (let a = 0; a < k; a++) for (let b = a + 1; b < k; b++) {
-      const want = 1 - cosine(centroids[a], centroids[b]);   // dissimilar -> far apart
+  for (let step = 0; step < 600; step++) {
+    for (let a = 0; a < live.length; a++) for (let b = a + 1; b < live.length; b++) {
+      const want = Math.max(0.22, 1 - cosine(centroids[live[a].ci], centroids[live[b].ci]));
       const dx = pts[b].x - pts[a].x, dy = pts[b].y - pts[a].y;
       const dist = Math.hypot(dx, dy) || 1e-6;
-      const push = (want * 0.62 - dist) * 0.05;
+      const push = (want * 0.55 - dist) * 0.04;
       pts[a].x -= (dx / dist) * push; pts[a].y -= (dy / dist) * push;
       pts[b].x += (dx / dist) * push; pts[b].y += (dy / dist) * push;
     }
   }
   const xs = pts.map((p) => p.x), ys = pts.map((p) => p.y);
-  const nx = (v) => 0.14 + 0.72 * (v - Math.min(...xs)) / ((Math.max(...xs) - Math.min(...xs)) || 1);
-  const ny = (v) => 0.16 + 0.68 * (v - Math.min(...ys)) / ((Math.max(...ys) - Math.min(...ys)) || 1);
+  const nx = (v) => 0.10 + 0.80 * (v - Math.min(...xs)) / ((Math.max(...xs) - Math.min(...xs)) || 1);
+  const ny = (v) => 0.13 + 0.74 * (v - Math.min(...ys)) / ((Math.max(...ys) - Math.min(...ys)) || 1);
 
-  const PALETTE = ["#CCA33E", "#4E7A9B", "#8A6BA8", "#5B8C6E", "#B5713F", "#A0526D", "#3F7C77"];
+  const PALETTE = ["#CCA33E","#4E7A9B","#8A6BA8","#5B8C6E","#B5713F","#A0526D","#3F7C77",
+                   "#7A6A3F","#5C6BA8","#9B5B4E","#4E8C9B","#8C7A3F","#6E5B8C","#3F7C5B"];
 
   await fetch(`${process.env.SUPABASE_URL}/rest/v1/discovery_clusters?id=gt.0`, {
     method: "DELETE",
-    headers: {
-      apikey: process.env.SUPABASE_SERVICE_KEY,
-      Authorization: `Bearer ${process.env.SUPABASE_SERVICE_KEY}`,
-      "Content-Profile": "content_studio",
-    },
+    headers: { apikey: process.env.SUPABASE_SERVICE_KEY,
+               Authorization: `Bearer ${process.env.SUPABASE_SERVICE_KEY}`,
+               "Content-Profile": "content_studio" },
   });
 
-  const inserted = await sbInsert("discovery_clusters", named.map((n, i) => ({
+  const inserted = await sbInsert("discovery_clusters", live.map((n, i) => ({
     name: n.name, blurb: n.blurb, centroid: centroids[n.ci],
-    x: nx(pts[n.ci].x), y: ny(pts[n.ci].y),
+    x: nx(pts[i].x), y: ny(pts[i].y),
     colour: PALETTE[i % PALETTE.length], piece_count: n.count,
   })));
 
-  // One PATCH per cluster, not one per piece. 689 sequential writes would
-  // take ~35 seconds on its own and time out before it finished.
-  for (let ci = 0; ci < k; ci++) {
-    const clusterRow = inserted[ci];
+  // Clear old assignments, then assign in bulk — one write per region.
+  await sbPatch("pieces", { cluster_id: "not.is.null" }, { cluster_id: null });
+  for (let i = 0; i < live.length; i++) {
+    const clusterRow = inserted[i];
     if (!clusterRow) continue;
-    const ids = rows.filter((_, i) => assign[i] === ci).map((r) => r.id);
+    const ids = eligible.filter((_, j) => assign[j] === live[i].ci).map((r) => r.id);
     for (let j = 0; j < ids.length; j += 150) {
-      const slice = ids.slice(j, j + 150);
-      await sbPatch("pieces", { id: `in.(${slice.join(",")})` }, { cluster_id: clusterRow.id });
+      await sbPatch("pieces", { id: `in.(${ids.slice(j, j + 150).join(",")})` },
+                    { cluster_id: clusterRow.id });
     }
   }
 
-  return { clusters: named.map((n) => ({ name: n.name, count: n.count })) };
+  return { clusters: live.map((n) => ({ name: n.name, count: n.count, samples: n.samples })),
+           eligible: eligible.length, excluded: rows.length - eligible.length };
 }
 
 export default async (req) => {
@@ -341,7 +374,7 @@ export default async (req) => {
     if (job === "pieces")     return json(await enrichPieces());
     if (job === "chunks")     return json(await backfillChunks(user.id));
     if (job === "situations") return json(await embedSituations());
-    if (job === "clusters")   return json(await buildClusters(body.k || 5));
+    if (job === "clusters")   return json(await buildClusters(body.k || 14));
     return json({ error: `unknown job: ${job}` }, 400);
   } catch (e) {
     return json({ error: String(e).slice(0, 400) }, 500);
