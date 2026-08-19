@@ -107,6 +107,7 @@ Three or four situations. Each under 90 characters. The reader note under 180 ch
    --------------------------------------------------------------------- */
 const CHUNK_TARGET = 1200;   // characters
 const CHUNK_MIN    = 320;
+const EMBED_TRUNC  = 8000;   // matches how the existing index was built
 const CHUNK_BATCH  = 12;     // pieces per invocation
 
 function splitIntoChunks(text) {
@@ -153,7 +154,10 @@ async function backfillChunks(userId) {
     try {
       const parts = splitIntoChunks(p.content);
       if (!parts.length) continue;
-      const vecs = await embed(parts.map((t) => `${p.title}\n\n${t}`));
+      // Verified against the live index: title + blank line + content,
+      // truncated at 8000 characters. Reconstructs stored vectors at 1.0000
+      // cosine. Do not change without re-running detect_embedding.py.
+      const vecs = await embed(parts.map((t) => `${p.title}\n\n${t}`.slice(0, EMBED_TRUNC)));
       await sbInsert("piece_chunks", parts.map((t, i) => ({
         piece_id: p.id,
         user_id: p.user_id || userId,
