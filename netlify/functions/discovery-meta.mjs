@@ -3,7 +3,7 @@
    Everything the widget needs to render before anyone searches:
    the situation chips and the cluster map. No embeddings leave the server.
    ===================================================================== */
-import { sbSelect, json, CORS } from "./_lib/common.js";
+import { sbSelect, sbSelectAll, json, CORS } from "./_lib/common.js";
 
 export default async (req) => {
   if (req.method === "OPTIONS") return new Response("", { status: 204, headers: CORS });
@@ -15,10 +15,10 @@ export default async (req) => {
       sbSelect("discovery_clusters", {
         select: "id,name,blurb,x,y,colour,piece_count", order: "piece_count.desc",
       }),
-      sbSelect("pieces", {
+      sbSelectAll("pieces", {
         select: "id,title,url",
         cluster_id: "not.is.null",
-        limit: "1000",
+        order: "id.asc",
       }),
     ]);
 
@@ -26,10 +26,14 @@ export default async (req) => {
     // predicament someone might be in; hovering shows it, clicking opens
     // the piece that addresses it. A piece with four situations appears
     // four times, which is honest — it genuinely speaks to four things.
-    const phrases = await sbSelect("discovery_phrases", {
+    // Paged: PostgREST caps a response at 1000 rows whatever `limit` says,
+    // and there are ~1,480 placed situations. Asking for 1,400 silently
+    // returned 1,000, dropping the highest ids — which skews to the most
+    // recently added pieces.
+    const phrases = await sbSelectAll("discovery_phrases", {
       select: "id,phrase,piece_id,cluster_id",
       cluster_id: "not.is.null",
-      limit: "1400",
+      order: "id.asc",
     });
 
     const pieceById = {};
