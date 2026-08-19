@@ -29,7 +29,7 @@
   ];
 
   var state = {
-    view: "ask", meta: null, results: null, matched: null,
+    view: "ask", meta: null, results: null, matched: null, region: null,
     query: "", situation: null, steer: null,
     busy: false, error: null, loadedMeta: false
   };
@@ -94,10 +94,27 @@
     '.steerlab { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px;',
     '  color: #8A8F99; margin-bottom: 10px; }',
     '.err { font-size: 14px; color: #A02828; padding: 14px 0; }',
+    '.rgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(310px, 1fr));',
+    '  border-top: 1px solid #DCDCD6; border-left: 1px solid #DCDCD6; }',
+    '.rcard { text-align: left; font-family: inherit; background: #fff; cursor: pointer;',
+    '  padding: 18px 20px 20px; border: none; border-right: 1px solid #DCDCD6;',
+    '  border-bottom: 1px solid #DCDCD6; border-left: 3px solid transparent;',
+    '  transition: background 130ms, border-left-color 130ms; }',
+    '.rcard:hover { background: #F4F4F1; border-left-color: #CCA33E; }',
+    '.rname { font-weight: 700; font-size: 16px; color: #282E3A; line-height: 1.3; }',
+    '.rcount { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 10.5px;',
+    '  color: #8A8F99; margin: 4px 0 11px; }',
+    '.rsits { list-style: none; margin: 0; padding: 0; }',
+    '.rsits li { font-size: 13px; color: #565C68; line-height: 1.45; padding: 3px 0 3px 13px;',
+    '  position: relative; }',
+    '.rsits li::before { content: ""; position: absolute; left: 0; top: 11px; width: 5px;',
+    '  height: 1px; background: #CCA33E; }',
+    '.backlink { font-family: inherit; font-size: 13px; font-weight: 600; color: #8A8F99;',
+    '  background: none; border: none; cursor: pointer; padding: 0 0 14px; }',
+    '.backlink:hover { color: #282E3A; }',
+    '.rhead h3 { font-weight: 700; font-size: 22px; color: #282E3A; margin-bottom: 5px; }',
+    '.rhead p { font-size: 14.5px; color: #565C68; max-width: 66ch; margin-bottom: 6px; }',
     '.mapwrap { position: relative; background: #F4F4F1; padding: 8px; }',
-    'svg { display: block; width: 100%; height: auto; }',
-    'svg circle { cursor: pointer; }',
-    'svg circle:hover { opacity: 1 !important; }',
     '.cl { font-weight: 700; font-size: 10.5px; fill: #282E3A; letter-spacing: .01em;',
     '  font-family: "Raleway", sans-serif; paint-order: stroke; stroke: #F4F4F1;',
     '  stroke-width: 3px; stroke-linejoin: round; }',
@@ -152,91 +169,60 @@
   }
 
 
-  /* Labels sit at region centres, which on real data means they collide and
-     run off the edges. Estimate each label's box, then nudge them apart
-     vertically until they stop overlapping, and flip the anchor near the
-     edges so nothing gets clipped. */
-  function placeLabels(clusters, W, H) {
-    var CHAR = 5.6, LINE = 26, PAD = 3;
-    var items = clusters.map(function (c) {
-      var w = Math.max(String(c.name).length * CHAR, 46);
-      return { id: c.id, name: c.name, piece_count: c.piece_count,
-               w: w, lx: c.x * W, ly: c.y * H - 46, anchor: "middle" };
-    });
-
-    for (var pass = 0; pass < 90; pass++) {
-      var moved = false;
-      for (var a = 0; a < items.length; a++) {
-        for (var b = a + 1; b < items.length; b++) {
-          var A = items[a], B = items[b];
-          var dx = Math.abs(A.lx - B.lx), dy = Math.abs(A.ly - B.ly);
-          var needX = (A.w + B.w) / 2 + 10, needY = LINE;
-          if (dx < needX && dy < needY) {
-            var shift = (needY - dy) / 2 + PAD;
-            if (A.ly <= B.ly) { A.ly -= shift; B.ly += shift; }
-            else              { A.ly += shift; B.ly -= shift; }
-            moved = true;
-          }
-        }
-      }
-      if (!moved) break;
-    }
-
-    items.forEach(function (it) {
-      it.ly = Math.max(14, Math.min(H - 10, it.ly));
-      if (it.lx - it.w / 2 < 6)      { it.anchor = "start"; it.lx = 6; }
-      else if (it.lx + it.w / 2 > W - 6) { it.anchor = "end";   it.lx = W - 6; }
-      it.lx = Math.round(it.lx); it.ly = Math.round(it.ly);
-    });
-    return items;
-  }
-
-  function mapHTML() {
+  function regionsHTML() {
     var m = state.meta;
     if (!m || !m.clusters || !m.clusters.length) {
-      return '<div class="status">The map hasn\'t been built yet.</div>';
+      return '<div class="status">The regions haven\'t been built yet.</div>';
     }
-    var W = 900, H = 520;
-    return '<div class="mapwrap"><svg viewBox="0 0 ' + W + " " + H + '">' +
-      m.points.map(function (p) {
-        var c = m.clusters.filter(function (x) { return x.id === p.c; })[0];
-        if (!c) return "";
-        return '<circle cx="' + (p.x * W).toFixed(1) + '" cy="' + (p.y * H).toFixed(1) +
-          '" r="' + (p.big ? 5 : 3.2) + '" fill="' + esc(c.colour || "#CCA33E") +
-          '" opacity="' + (p.big ? .85 : .5) + '" data-t="' + esc(p.t) + '" data-pt="' + esc(p.pt || "") + '" data-u="' + esc(p.u) + '"></circle>';
-      }).join("") +
-      placeLabels(m.clusters, W, H).map(function (c) {
-        return '<text class="cl" x="' + c.lx + '" y="' + c.ly + '" text-anchor="' + c.anchor + '"' +
-               ' data-cl="' + c.id + '">' + esc(c.name) + "</text>" +
-               '<text class="cl-count" x="' + c.lx + '" y="' + (c.ly + 13) +
-               '" text-anchor="' + c.anchor + '">' + c.piece_count + " pieces</text>";
-      }).join("") +
-      '</svg><div class="tip" id="tip"></div></div>' +
-      '<div class="maphint">' + (m.situation_count || m.points.length) + " situations drawn from " +
-      m.total + " pieces, grouped into " + m.clusters.length + " regions. " +
-      "Every dot is something someone might be dealing with. Hover to read it, click to open the piece.</div>";
+    if (state.region) {
+      return '<button class="backlink" data-back="1">\u2190 All regions</button>' +
+        '<div class="rhead"><h3>' + esc(state.region.name) + "</h3>" +
+        (state.region.blurb ? "<p>" + esc(state.region.blurb) + "</p>" : "") + "</div>" +
+        resultsHTML();
+    }
+    return '<div class="rgrid">' + m.clusters.map(function (c) {
+      return '<button class="rcard" data-region="' + c.id + '">' +
+        '<div class="rname">' + esc(c.name) + "</div>" +
+        '<div class="rcount">' + c.piece_count + " pieces</div>" +
+        '<ul class="rsits">' + (c.samples || []).slice(0, 3).map(function (sx) {
+          return "<li>" + esc(sx) + "</li>";
+        }).join("") + "</ul></button>";
+    }).join("") + "</div>" +
+    '<div class="maphint">' + (m.situation_count || 0) + " situations drawn from " +
+    m.total + " pieces. Every line is something an owner or operator brought to us.</div>";
   }
 
   function paint() {
     var m = state.meta;
     root.innerHTML = "<style>" + CSS + "</style><div class=\"wrap\">" +
       '<div class="tabs">' +
-      '<button class="tab ' + (state.view === "ask" ? "on" : "") + '" data-view="ask">Start from a situation</button>' +
-      '<button class="tab ' + (state.view === "map" ? "on" : "") + '" data-view="map">See the whole library</button>' +
+      '<button class="tab ' + (state.view === "ask" ? "on" : "") + '" data-view="ask">In your own words</button>' +
+      '<button class="tab ' + (state.view === "map" ? "on" : "") + '" data-view="map">Browse by situation</button>' +
       "</div>" +
       (state.view === "ask"
-        ? '<div class="eyebrow"><span class="bar"></span>Describe it in your own words</div>' +
-          '<div class="askrow"><input class="ask" id="q" placeholder="We need to raise prices but I\'m worried about our three biggest customers" value="' + esc(state.query) + '">' +
+        ? '<div class="askrow"><input class="ask" id="q" placeholder="We need to raise prices but I\'m worried about our three biggest customers" value="' + esc(state.query) + '">' +
           '<button class="go" id="go"' + (state.busy ? " disabled" : "") + ">Find</button></div>" +
           '<div class="chips">' + ((m && m.situations) || []).map(function (s) {
             return '<button class="chip ' + (state.situation === s.slug ? "on" : "") + '" data-sit="' + esc(s.slug) + '">' + esc(s.label) + "</button>";
           }).join("") + "</div>" + resultsHTML()
-        : mapHTML()) +
+        : regionsHTML()) +
       "</div>";
 
     root.querySelectorAll("[data-view]").forEach(function (b) {
-      b.onclick = function () { state.view = b.dataset.view; track("view", b.dataset.view); paint(); };
+      b.onclick = function () {
+        state.view = b.dataset.view;
+        if (state.view !== "map") { state.region = null; }
+        track("view", b.dataset.view);
+        paint();
+      };
     });
+    root.querySelectorAll("[data-region]").forEach(function (b) {
+      b.onclick = function () { openRegion(b.dataset.region); };
+    });
+    var back = root.querySelector("[data-back]");
+    if (back) back.onclick = function () {
+      state.region = null; state.results = null; paint();
+    };
     root.querySelectorAll("[data-sit]").forEach(function (b) {
       b.onclick = function () { search({ situation: b.dataset.sit }); };
     });
@@ -283,6 +269,20 @@
         c.onclick = function () { if (c.dataset.u) { track("open_piece", c.dataset.pt || c.dataset.t); window.location.href = c.dataset.u; } };
       });
     }
+  }
+
+  function openRegion(id) {
+    var c = (state.meta.clusters || []).filter(function (x) { return String(x.id) === String(id); })[0];
+    state.region = c ? { id: c.id, name: c.name, blurb: c.blurb } : { id: id, name: "" };
+    state.results = null; state.busy = true; state.error = null; state.steer = null;
+    track("open_region", state.region.name);
+    paint();
+    api("/api/discovery-search", { region: id }).then(function (d) {
+      state.results = d.results || [];
+      if (d.region) state.region = d.region;
+    }).catch(function (e) {
+      state.error = e.message || "Something went wrong.";
+    }).then(function () { state.busy = false; paint(); });
   }
 
   function search(opts) {
