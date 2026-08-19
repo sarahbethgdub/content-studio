@@ -69,6 +69,23 @@
 # (export const config = { path: "/api/discovery-..." }) so they need no
 # redirect entries here.
 
+# Belt and braces: set CORS at the edge too, so a preflight that never
+# reaches the function still answers correctly. The functions set these as
+# well; duplicating them here is harmless and covers the routing case.
+[[headers]]
+  for = "/api/discovery-search"
+  [headers.values]
+    Access-Control-Allow-Origin = "https://www.permanentequity.com"
+    Access-Control-Allow-Headers = "Content-Type"
+    Access-Control-Allow-Methods = "POST, OPTIONS"
+
+[[headers]]
+  for = "/api/discovery-meta"
+  [headers.values]
+    Access-Control-Allow-Origin = "https://www.permanentequity.com"
+    Access-Control-Allow-Headers = "Content-Type"
+    Access-Control-Allow-Methods = "POST, OPTIONS"
+
 [[headers]]
   for = "/index.html"
   [headers.values]
