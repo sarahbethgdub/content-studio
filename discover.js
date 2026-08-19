@@ -88,6 +88,11 @@
     '.ititle a { color: #282E3A; text-decoration: none; border-bottom: 2px solid #CCA33E; }',
     '.ititle a:hover { color: #CCA33E; }',
     '.iwhy { font-size: 14.5px; color: #565C68; max-width: 74ch; }',
+    '.imatched { list-style: none; margin: 0 0 9px; padding: 0; }',
+    '.imatched li { font-size: 14px; color: #282E3A; line-height: 1.45;',
+    '  padding: 2px 0 2px 14px; position: relative; }',
+    '.imatched li::before { content: ""; position: absolute; left: 0; top: 11px;',
+    '  width: 6px; height: 1px; background: #CCA33E; }',
     '.ipull { margin-top: 11px; font-size: 14.5px; color: #282E3A; padding-left: 15px;',
     '  border-left: 3px solid #CCA33E; max-width: 70ch; font-style: italic; }',
     '.steer { margin: 24px 0 6px; }',
@@ -158,7 +163,11 @@
           '<div class="imeta"><span class="icat">' + esc(r.category) + "</span>" +
           "<span>" + Math.round((r.char_count || 0) / 1000) + "k chars</span></div>" +
           '<div class="ititle"><a href="' + esc(r.url) + '" data-piece="' + esc(r.title) + '">' + esc(r.title) + "</a></div>" +
-          '<div class="iwhy">' + esc(r.why) + "</div>" +
+          ((r.matched && r.matched.length)
+            ? '<ul class="imatched">' + r.matched.map(function (mm) {
+                return "<li>" + esc(mm) + "</li>"; }).join("") + "</ul>"
+            : "") +
+          (r.why ? '<div class="iwhy">' + esc(r.why) + "</div>" : "") +
           (r.pull_quote ? '<div class="ipull">' + esc(r.pull_quote) + "</div>" : "") +
           "</div>";
       }).join("") + "</div>" +
