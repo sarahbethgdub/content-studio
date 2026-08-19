@@ -3,9 +3,10 @@
    Everything the widget needs to render before anyone searches:
    the situation chips and the cluster map. No embeddings leave the server.
    ===================================================================== */
-import { sbSelect, sbSelectAll, json, CORS } from "./_lib/common.js";
+import { sbSelect, sbSelectAll, json, corsFor } from "./_lib/common.js";
 
 export default async (req) => {
+  const CORS = corsFor(req);
   if (req.method === "OPTIONS") return new Response("", { status: 204, headers: CORS });
   try {
     const [situations, clusters, pieces] = await Promise.all([
@@ -62,12 +63,20 @@ export default async (req) => {
       };
     }).filter(Boolean);
 
-    // Three representative situations per region — far more explanatory
-    // than three titles, because they say what the region is FOR.
+    // Representative situations per region. These ARE the interface now —
+    // a region name alone can't carry 80 pieces, but three real predicaments
+    // tell you instantly whether it's yours. Drawn from distinct pieces so a
+    // single article can't supply all three.
     const samples = {};
+    const seenPiece = {};
     for (const ph of phrases) {
-      (samples[ph.cluster_id] = samples[ph.cluster_id] || []);
-      if (samples[ph.cluster_id].length < 3) samples[ph.cluster_id].push(ph.phrase);
+      const c = ph.cluster_id;
+      samples[c] = samples[c] || [];
+      seenPiece[c] = seenPiece[c] || new Set();
+      if (samples[c].length < 4 && !seenPiece[c].has(ph.piece_id)) {
+        samples[c].push(ph.phrase);
+        seenPiece[c].add(ph.piece_id);
+      }
     }
     const withSamples = clusters.map((c) => ({ ...c, samples: samples[c.id] || [] }));
 

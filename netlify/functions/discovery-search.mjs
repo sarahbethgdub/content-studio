@@ -12,7 +12,7 @@
    about half a cent. Rate limited regardless.
    ===================================================================== */
 import { sbSelect, sbRpc, sbInsert, embed, claude, parseJson,
-         cosine, parseVector, json, CORS, sha256 } from "./_lib/common.js";
+         cosine, parseVector, json, corsFor, sha256 } from "./_lib/common.js";
 
 const RESULTS = 5;
 const RATE_WINDOW_MIN = 10;
@@ -35,6 +35,7 @@ async function rateLimited(req) {
 }
 
 export default async (req) => {
+  const CORS = corsFor(req);
   if (req.method === "OPTIONS") return new Response("", { status: 204, headers: CORS });
   if (req.method !== "POST") return json({ error: "POST only" }, 405, CORS);
 
@@ -43,8 +44,41 @@ export default async (req) => {
   const query = String(body.query || "").trim().slice(0, MAX_QUERY);
   const slug  = body.situation ? String(body.situation).slice(0, 60) : null;
   const steer = ["tactical", "contrarian", "short", "people"].includes(body.steer) ? body.steer : null;
+  const region = body.region ? parseInt(body.region, 10) : null;
 
-  if (!query && !slug) return json({ error: "Say what you're dealing with." }, 400, CORS);
+  if (!query && !slug && !region) return json({ error: "Say what you're dealing with." }, 400, CORS);
+
+  // Browsing a region: return its pieces directly. No embedding, no Claude,
+  // no rate limit — this is the index working, not a search.
+  if (region) {
+    try {
+      const cluster = (await sbSelect("discovery_clusters", {
+        select: "id,name,blurb", id: `eq.${region}` }))[0];
+      if (!cluster) return json({ error: "Unknown region." }, 400, CORS);
+
+      const rows = await sbSelect("pieces", {
+        select: "title,url,category,char_count,reader_note,pull_quote,excerpt,situations",
+        cluster_id: `eq.${region}`,
+        order: "char_count.desc",
+        limit: "12",
+      });
+
+      return json({
+        results: rows.map((r) => ({
+          title: r.title, url: r.url, category: r.category, char_count: r.char_count,
+          why: (r.reader_note || r.excerpt || "").slice(0, 320),
+          pull_quote: r.pull_quote || "",
+          situations: r.situations || [],
+          similarity: null,
+        })),
+        matched_situation: cluster.name,
+        region: { id: cluster.id, name: cluster.name, blurb: cluster.blurb },
+        relevance: "region",
+      }, 200, { ...CORS, "Cache-Control": "public, max-age=300" });
+    } catch (e) {
+      return json({ error: String(e).slice(0, 300) }, 500, CORS);
+    }
+  }
 
   try {
     if (await rateLimited(req)) {
