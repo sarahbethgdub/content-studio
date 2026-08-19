@@ -113,12 +113,48 @@ export async function claude(system, user, maxTokens = 1400) {
   return (d.content || []).filter((b) => b.type === "text").map((b) => b.text).join("");
 }
 
-/** Claude asked for JSON still sometimes wraps it in a fence. */
+/** Claude asked for JSON still sometimes wraps it in a fence — and, more
+ *  awkwardly, sometimes writes an unescaped " inside a string value. That is
+ *  most common in a pull quote, where the source text quotes someone. Rather
+ *  than lose the whole record, fall back to a lenient field extraction. */
 export function parseJson(text) {
   const clean = String(text).replace(/```json\s*/gi, "").replace(/```/g, "").trim();
   const start = clean.search(/[[{]/);
   if (start < 0) throw new Error("no JSON found in response");
-  return JSON.parse(clean.slice(start));
+  const body = clean.slice(start);
+
+  try {
+    return JSON.parse(body);
+  } catch (e) {
+    const repaired = repairJson(body);
+    if (repaired) return repaired;
+    throw e;
+  }
+}
+
+/** Pull the fields out by hand when the JSON is malformed. Only handles the
+ *  shapes we actually ask for; returns null if it can't manage. */
+function repairJson(body) {
+  const out = {};
+
+  // string arrays, e.g. "situations": ["a", "b"]
+  const arr = body.match(/"situations"\s*:\s*\[([\s\S]*?)\]/);
+  if (arr) {
+    out.situations = (arr[1].match(/"((?:[^"\\]|\\.)*)"/g) || [])
+      .map((s) => s.slice(1, -1).replace(/\\"/g, '"').trim())
+      .filter(Boolean);
+  }
+
+  // Scalar strings: take everything between the opening quote and the last
+  // quote that precedes a comma-newline or the closing brace. This tolerates
+  // unescaped quotation marks in the middle of the value.
+  for (const key of ["reader_note", "pull_quote", "name", "blurb"]) {
+    const re = new RegExp('"' + key + '"\\s*:\\s*"([\\s\\S]*?)"\\s*(?=,\\s*"|\\s*\\})');
+    const m = body.match(re);
+    if (m) out[key] = m[1].replace(/\\"/g, '"').replace(/\\n/g, "\n").trim();
+  }
+
+  return Object.keys(out).length ? out : null;
 }
 
 /* ---------- Vector maths (small corpus, so plain JS is fine) ---------- */
