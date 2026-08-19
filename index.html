@@ -284,8 +284,28 @@
         if (job === "situations") { enrichLog(`Embedded ${data.embedded} situations. Done.`); break; }
 
         if (job === "clusters") {
-          enrichLog("Clusters built:");
-          (data.clusters || []).forEach(c => enrichLog(`   ${c.name}  (${c.count} pieces)`));
+          enrichLog(`Regions named (from a sample of ${data.sampled} situations):`);
+          (data.clusters || []).forEach(c => {
+            enrichLog(`   ${c.name}`);
+            (c.sample || []).slice(0, 2).forEach(sx => enrichLog(`        ${sx}`));
+          });
+          enrichLog("Placing every situation into a region…");
+
+          // Assignment runs as its own request — the whole job together
+          // exceeds Netlify's 30s gateway limit.
+          let guard = 0;
+          while (guard++ < 30) {
+            const a = await studioApiJson("/api/discovery-enrich", { job: "assign" });
+            if (a.error) { enrichLog(`ERROR ${a.error}`); break; }
+            if (a.done) {
+              enrichLog("Placed. Final regions:");
+              (a.clusters || []).forEach(c => enrichLog(`   ${String(c.count).padStart(5)}  ${c.name}`));
+              break;
+            }
+            enrichLog(`   ${a.remaining} situations left to place…`);
+            if (state.enrich.stop) { enrichLog("Stopped mid-assignment — re-run Build the map."); break; }
+            await new Promise(r => setTimeout(r, 250));
+          }
           break;
         }
 
@@ -2020,8 +2040,28 @@
         if (job === "situations") { enrichLog(`Embedded ${data.embedded} situations. Done.`); break; }
 
         if (job === "clusters") {
-          enrichLog("Clusters built:");
-          (data.clusters || []).forEach(c => enrichLog(`   ${c.name}  (${c.count} pieces)`));
+          enrichLog(`Regions named (from a sample of ${data.sampled} situations):`);
+          (data.clusters || []).forEach(c => {
+            enrichLog(`   ${c.name}`);
+            (c.sample || []).slice(0, 2).forEach(sx => enrichLog(`        ${sx}`));
+          });
+          enrichLog("Placing every situation into a region…");
+
+          // Assignment runs as its own request — the whole job together
+          // exceeds Netlify's 30s gateway limit.
+          let guard = 0;
+          while (guard++ < 30) {
+            const a = await studioApiJson("/api/discovery-enrich", { job: "assign" });
+            if (a.error) { enrichLog(`ERROR ${a.error}`); break; }
+            if (a.done) {
+              enrichLog("Placed. Final regions:");
+              (a.clusters || []).forEach(c => enrichLog(`   ${String(c.count).padStart(5)}  ${c.name}`));
+              break;
+            }
+            enrichLog(`   ${a.remaining} situations left to place…`);
+            if (state.enrich.stop) { enrichLog("Stopped mid-assignment — re-run Build the map."); break; }
+            await new Promise(r => setTimeout(r, 250));
+          }
           break;
         }
 
