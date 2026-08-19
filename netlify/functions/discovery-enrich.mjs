@@ -108,7 +108,7 @@ Three or four situations. Each under 90 characters. The reader note under 180 ch
 const CHUNK_TARGET = 1200;   // characters
 const CHUNK_MIN    = 320;
 const EMBED_TRUNC  = 8000;   // matches how the existing index was built
-const CHUNK_BATCH  = 12;     // pieces per invocation
+const CHUNK_BATCH  = 5;      // parallel, sized to stay inside the 10s limit
 
 function splitIntoChunks(text) {
   const paras = String(text || "").split(/\n\s*\n/).map((p) => p.trim()).filter(Boolean);
@@ -134,46 +134,58 @@ function splitIntoChunks(text) {
 }
 
 async function backfillChunks(userId) {
+  // Deliberately light queries first. Pulling every piece WITH its content
+  // is ~3.6M characters and blows the function timeout before any work
+  // starts, so ids come first and content only for the chosen batch.
   const have = await sbSelect("piece_chunks", { select: "piece_id", limit: "100000" });
   const done = new Set(have.map((r) => r.piece_id));
 
-  const all = await sbSelect("pieces", {
-    select: "id,title,content,user_id", order: "char_count.desc", limit: "2000",
+  const ids = await sbSelect("pieces", {
+    select: "id,char_count", order: "char_count.desc", limit: "2000",
   });
-  const todo = all.filter((p) => !done.has(p.id) && (p.content || "").length > 40)
-                  .slice(0, CHUNK_BATCH);
+  const pending = ids.filter((p) => !done.has(p.id));
 
-  if (!todo.length) {
+  if (!pending.length) {
     return { done: true, processed: 0, remaining: 0,
              total_chunks: have.length, pieces_with_chunks: done.size };
   }
 
+  const batchIds = pending.slice(0, CHUNK_BATCH).map((p) => p.id);
+  const rows = await sbSelect("pieces", {
+    select: "id,title,content,user_id",
+    id: `in.(${batchIds.join(",")})`,
+  });
+
   let made = 0;
   const failures = [];
-  for (const p of todo) {
-    try {
-      const parts = splitIntoChunks(p.content);
-      if (!parts.length) continue;
-      // Verified against the live index: title + blank line + content,
-      // truncated at 8000 characters. Reconstructs stored vectors at 1.0000
-      // cosine. Do not change without re-running detect_embedding.py.
-      const vecs = await embed(parts.map((t) => `${p.title}\n\n${t}`.slice(0, EMBED_TRUNC)));
-      await sbInsert("piece_chunks", parts.map((t, i) => ({
-        piece_id: p.id,
-        user_id: p.user_id || userId,
-        chunk_index: i,
-        chunk_text: t,
-        embedding: vecs[i],
-      })));
-      made += parts.length;
-    } catch (e) {
-      failures.push({ id: p.id, title: p.title, error: String(e).slice(0, 160) });
-    }
-  }
 
-  const remaining = all.filter((p) => !done.has(p.id) && (p.content || "").length > 40).length - todo.length;
-  return { done: remaining <= 0, processed: todo.length, chunks_created: made,
-           remaining, failures };
+  // Parallel: sequential OpenAI calls are what pushed this past the limit.
+  const settled = await Promise.allSettled(rows.map(async (p) => {
+    const parts = splitIntoChunks(p.content);
+    if (!parts.length) return 0;
+    const vecs = await embed(parts.map((t) => `${p.title}\n\n${t}`.slice(0, EMBED_TRUNC)));
+    await sbInsert("piece_chunks", parts.map((t, i) => ({
+      piece_id: p.id,
+      user_id: p.user_id || userId,
+      chunk_index: i,
+      chunk_text: t,
+      embedding: vecs[i],
+    })));
+    return parts.length;
+  }));
+
+  settled.forEach((r, i) => {
+    if (r.status === "fulfilled") made += r.value;
+    else failures.push({ id: rows[i].id, title: rows[i].title, error: String(r.reason).slice(0, 160) });
+  });
+
+  return {
+    done: pending.length - rows.length <= 0,
+    processed: rows.length,
+    chunks_created: made,
+    remaining: pending.length - rows.length,
+    failures,
+  };
 }
 
 async function embedSituations() {
