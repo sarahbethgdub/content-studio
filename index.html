@@ -227,6 +227,82 @@
     line-height: 1.6;
   }
 
+
+  /* =====================================================================
+     DISCOVERY MAINTENANCE
+     Loops the enrich endpoint so you don't have to. Resumable: every job
+     only picks up rows that still need work, so stopping and restarting
+     costs nothing.
+     ===================================================================== */
+  const ENRICH_JOBS = {
+    chunks:     { label: "Chunk the library",  loops: true,
+                  note: "Splits pieces into passages and embeds them. ~1,300 to create." },
+    situations: { label: "Embed situations",   loops: false,
+                  note: "Embeds the eight canonical predicaments. Run once." },
+    pieces:     { label: "Write reader notes", loops: true,
+                  note: "Claude writes situations, a reader note and a pull quote per piece." },
+    clusters:   { label: "Build the map",      loops: false,
+                  note: "Groups the library and names each region. Run last." },
+  };
+
+  function enrichLog(line) {
+    state.enrich.log.unshift(
+      new Date().toLocaleTimeString("en-US", { hour12: false }) + "  " + line);
+    state.enrich.log = state.enrich.log.slice(0, 120);
+    const el = document.getElementById("enrichLog");
+    if (el) el.textContent = state.enrich.log.join("\n");
+  }
+
+  async function runEnrichJob(job) {
+    if (state.enrich.running) return;
+    const spec = ENRICH_JOBS[job];
+    if (!spec) return;
+
+    state.enrich.running = true;
+    state.enrich.job = job;
+    state.enrich.stop = false;
+    state.enrich.log = [];
+    render();
+    enrichLog(`Starting: ${spec.label}`);
+
+    let pass = 0, totalDone = 0;
+    try {
+      while (true) {
+        pass++;
+        const t0 = Date.now();
+        const data = await studioApiJson("/api/discovery-enrich", { job });
+        const secs = ((Date.now() - t0) / 1000).toFixed(1);
+
+        if (data.error) { enrichLog(`ERROR ${data.error}`); break; }
+
+        if (job === "situations") { enrichLog(`Embedded ${data.embedded} situations. Done.`); break; }
+
+        if (job === "clusters") {
+          enrichLog("Clusters built:");
+          (data.clusters || []).forEach(c => enrichLog(`   ${c.name}  (${c.count} pieces)`));
+          break;
+        }
+
+        totalDone += (data.processed || 0);
+        const made = data.chunks_created != null ? `, ${data.chunks_created} chunks` : "";
+        enrichLog(`Pass ${pass}: ${data.processed || 0} done${made}, ${data.remaining} left  (${secs}s)`);
+
+        (data.failures || []).forEach(f => enrichLog(`   failed: ${(f.title || f.id)} — ${f.error}`));
+
+        if (data.done || !data.processed) { enrichLog(`Finished. ${totalDone} processed.`); break; }
+        if (state.enrich.stop) { enrichLog(`Stopped. ${totalDone} processed, ${data.remaining} left.`); break; }
+        await new Promise(r => setTimeout(r, 400));   // be kind to the APIs
+      }
+    } catch (e) {
+      enrichLog(`ERROR ${e.message}`);
+    } finally {
+      state.enrich.running = false;
+      state.enrich.job = null;
+      render();
+      loadStudioData().then(() => render());
+    }
+  }
+
   /* =====================================================================
      SHELL
      ===================================================================== */
@@ -1108,7 +1184,33 @@
   /* The date is a switch. Nobody needs to know that. */
   #mastheadDate { cursor: default; user-select: none; }
 
+  /* ---------- Discovery maintenance ---------- */
+  .maint {
+    border-top: 1px solid var(--rule);
+    padding-top: 24px;
+    margin-bottom: 34px;
+  }
+  .maint-head { display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap; margin-bottom: 14px; }
+  .maint-hint { font-family: var(--mono); font-size: 11px; color: var(--ink-3); }
+  .maint-row { display: flex; gap: 8px; flex-wrap: wrap; }
+  .maint-btn {
+    font-family: var(--display); font-weight: 700; font-size: 12.5px;
+    padding: 8px 14px; border: 1px solid var(--rule); background: var(--paper);
+    color: var(--ink-2); transition: all 130ms;
+  }
+  .maint-btn:hover:not(:disabled) { border-color: var(--gold); color: var(--ink); }
+  .maint-btn:disabled { opacity: .45; cursor: default; }
+  .maint-btn.busy { border-color: var(--gold); background: var(--gold-dim); color: var(--ink); opacity: 1; }
+  .maint-stop { border-color: var(--red); color: var(--red); opacity: 1 !important; }
+  .maint-log {
+    margin-top: 14px; padding: 14px 16px; background: var(--navy); color: #D6D9DE;
+    font-family: var(--mono); font-size: 11.5px; line-height: 1.7;
+    max-height: 300px; overflow-y: auto; white-space: pre-wrap;
+  }
+
 </style>
+
+  
 
 </style>
 </head>
@@ -1169,6 +1271,7 @@
     },
     studioModal: null,       // {type, item, full?, rhAddOpen?}
     aiModal: null,           // see renderAiModal for shapes
+    enrich: { running: false, job: null, log: [], stop: false },
     piecesUI: {
       query: "",
       category: "all",
@@ -1843,6 +1946,82 @@
     `;
   }
 
+
+  /* =====================================================================
+     DISCOVERY MAINTENANCE
+     Loops the enrich endpoint so you don't have to. Resumable: every job
+     only picks up rows that still need work, so stopping and restarting
+     costs nothing.
+     ===================================================================== */
+  const ENRICH_JOBS = {
+    chunks:     { label: "Chunk the library",  loops: true,
+                  note: "Splits pieces into passages and embeds them. ~1,300 to create." },
+    situations: { label: "Embed situations",   loops: false,
+                  note: "Embeds the eight canonical predicaments. Run once." },
+    pieces:     { label: "Write reader notes", loops: true,
+                  note: "Claude writes situations, a reader note and a pull quote per piece." },
+    clusters:   { label: "Build the map",      loops: false,
+                  note: "Groups the library and names each region. Run last." },
+  };
+
+  function enrichLog(line) {
+    state.enrich.log.unshift(
+      new Date().toLocaleTimeString("en-US", { hour12: false }) + "  " + line);
+    state.enrich.log = state.enrich.log.slice(0, 120);
+    const el = document.getElementById("enrichLog");
+    if (el) el.textContent = state.enrich.log.join("\n");
+  }
+
+  async function runEnrichJob(job) {
+    if (state.enrich.running) return;
+    const spec = ENRICH_JOBS[job];
+    if (!spec) return;
+
+    state.enrich.running = true;
+    state.enrich.job = job;
+    state.enrich.stop = false;
+    state.enrich.log = [];
+    render();
+    enrichLog(`Starting: ${spec.label}`);
+
+    let pass = 0, totalDone = 0;
+    try {
+      while (true) {
+        pass++;
+        const t0 = Date.now();
+        const data = await studioApiJson("/api/discovery-enrich", { job });
+        const secs = ((Date.now() - t0) / 1000).toFixed(1);
+
+        if (data.error) { enrichLog(`ERROR ${data.error}`); break; }
+
+        if (job === "situations") { enrichLog(`Embedded ${data.embedded} situations. Done.`); break; }
+
+        if (job === "clusters") {
+          enrichLog("Clusters built:");
+          (data.clusters || []).forEach(c => enrichLog(`   ${c.name}  (${c.count} pieces)`));
+          break;
+        }
+
+        totalDone += (data.processed || 0);
+        const made = data.chunks_created != null ? `, ${data.chunks_created} chunks` : "";
+        enrichLog(`Pass ${pass}: ${data.processed || 0} done${made}, ${data.remaining} left  (${secs}s)`);
+
+        (data.failures || []).forEach(f => enrichLog(`   failed: ${(f.title || f.id)} — ${f.error}`));
+
+        if (data.done || !data.processed) { enrichLog(`Finished. ${totalDone} processed.`); break; }
+        if (state.enrich.stop) { enrichLog(`Stopped. ${totalDone} processed, ${data.remaining} left.`); break; }
+        await new Promise(r => setTimeout(r, 400));   // be kind to the APIs
+      }
+    } catch (e) {
+      enrichLog(`ERROR ${e.message}`);
+    } finally {
+      state.enrich.running = false;
+      state.enrich.job = null;
+      render();
+      loadStudioData().then(() => render());
+    }
+  }
+
   /* =====================================================================
      SHELL
      ===================================================================== */
@@ -2177,6 +2356,28 @@
           </button>
         `).join("")}
       </div>
+      <section class="maint">
+        <div class="maint-head">
+          <span class="eyebrow"><span class="eyebrow-bar"></span>Discovery maintenance</span>
+          <span class="maint-hint">Feeds the public discovery widget. Safe to stop and resume.</span>
+        </div>
+        <div class="maint-row">
+          ${Object.entries(ENRICH_JOBS).map(([id, j]) => `
+            <button class="maint-btn ${state.enrich.job === id ? "busy" : ""}"
+                    data-studio-action="enrich-run" data-job="${id}"
+                    ${state.enrich.running ? "disabled" : ""} title="${escapeHtml(j.note)}">
+              ${state.enrich.job === id ? "Running…" : escapeHtml(j.label)}
+            </button>
+          `).join("")}
+          ${state.enrich.running
+            ? `<button class="maint-btn maint-stop" data-studio-action="enrich-stop">Stop after this pass</button>`
+            : ""}
+        </div>
+        ${state.enrich.log.length
+          ? `<pre class="maint-log" id="enrichLog">${escapeHtml(state.enrich.log.join("\n"))}</pre>`
+          : ""}
+      </section>
+
       <div class="ideas-freeform">
         <span class="eyebrow"><span class="eyebrow-bar"></span>Or ask the corpus</span>
         <div class="ideas-freeform-row">
@@ -2564,6 +2765,12 @@
       state.aiModal = null; render(); return;
     }
     if (action === "ai-save-history") { return saveAiOutputToHistory(); }
+    if (action === "enrich-run") {
+      const job = e && e.currentTarget && e.currentTarget.dataset.job;
+      if (job) runEnrichJob(job);
+      return;
+    }
+    if (action === "enrich-stop") { state.enrich.stop = true; enrichLog("Stopping after this pass…"); return; }
     if (action === "mark-tap") { if (window.__markTap) window.__markTap(); return; }
     if (action === "stat-jump") {
       const where = e && e.currentTarget && e.currentTarget.dataset.jump;
