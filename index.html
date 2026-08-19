@@ -251,6 +251,7 @@
     state.enrich.log = state.enrich.log.slice(0, 120);
     const el = document.getElementById("enrichLog");
     if (el) el.textContent = state.enrich.log.join("\n");
+    else render();   // first line: the panel has no log element yet
   }
 
   async function runEnrichJob(job) {
@@ -264,6 +265,7 @@
     state.enrich.log = [];
     render();
     enrichLog(`Starting: ${spec.label}`);
+    enrichLog("Working… the first pass reads the library and can take a moment.");
 
     let pass = 0, totalDone = 0;
     try {
@@ -1970,6 +1972,7 @@
     state.enrich.log = state.enrich.log.slice(0, 120);
     const el = document.getElementById("enrichLog");
     if (el) el.textContent = state.enrich.log.join("\n");
+    else render();   // first line: the panel has no log element yet
   }
 
   async function runEnrichJob(job) {
@@ -1983,6 +1986,7 @@
     state.enrich.log = [];
     render();
     enrichLog(`Starting: ${spec.label}`);
+    enrichLog("Working… the first pass reads the library and can take a moment.");
 
     let pass = 0, totalDone = 0;
     try {
