@@ -242,7 +242,7 @@
     pieces:     { label: "Write reader notes", loops: true,
                   note: "Claude writes situations, a reader note and a pull quote per piece." },
     clusters:   { label: "Build the map",      loops: false,
-                  note: "Groups the library and names each region. Run last." },
+                  note: "Groups the library and names each region. Run last. Safe to re-run with a different region count." },
   };
 
   function enrichLog(line) {
@@ -272,7 +272,9 @@
       while (true) {
         pass++;
         const t0 = Date.now();
-        const data = await studioApiJson("/api/discovery-enrich", { job });
+        const body = { job };
+        if (job === "clusters") body.k = state.enrich.k || 18;
+        const data = await studioApiJson("/api/discovery-enrich", body);
         const secs = ((Date.now() - t0) / 1000).toFixed(1);
 
         if (data.error) { enrichLog(`ERROR ${data.error}`); break; }
@@ -1210,6 +1212,17 @@
     max-height: 300px; overflow-y: auto; white-space: pre-wrap;
   }
 
+
+  .maint-k {
+    display: inline-flex; align-items: center; gap: 7px;
+    font-family: var(--mono); font-size: 11px; color: var(--ink-3);
+    margin-left: 4px;
+  }
+  .maint-k input {
+    width: 52px; font-family: var(--mono); font-size: 12px; padding: 7px 8px;
+    border: 1px solid var(--rule); background: var(--paper); color: var(--ink);
+  }
+  .maint-k input:focus { outline: none; border-color: var(--navy); }
 </style>
 
   
@@ -1273,7 +1286,7 @@
     },
     studioModal: null,       // {type, item, full?, rhAddOpen?}
     aiModal: null,           // see renderAiModal for shapes
-    enrich: { running: false, job: null, log: [], stop: false },
+    enrich: { running: false, job: null, log: [], stop: false, k: 18 },
     piecesUI: {
       query: "",
       category: "all",
@@ -1963,7 +1976,7 @@
     pieces:     { label: "Write reader notes", loops: true,
                   note: "Claude writes situations, a reader note and a pull quote per piece." },
     clusters:   { label: "Build the map",      loops: false,
-                  note: "Groups the library and names each region. Run last." },
+                  note: "Groups the library and names each region. Run last. Safe to re-run with a different region count." },
   };
 
   function enrichLog(line) {
@@ -1993,7 +2006,9 @@
       while (true) {
         pass++;
         const t0 = Date.now();
-        const data = await studioApiJson("/api/discovery-enrich", { job });
+        const body = { job };
+        if (job === "clusters") body.k = state.enrich.k || 18;
+        const data = await studioApiJson("/api/discovery-enrich", body);
         const secs = ((Date.now() - t0) / 1000).toFixed(1);
 
         if (data.error) { enrichLog(`ERROR ${data.error}`); break; }
@@ -2373,6 +2388,10 @@
               ${state.enrich.job === id ? "Running…" : escapeHtml(j.label)}
             </button>
           `).join("")}
+          <label class="maint-k">regions
+            <input id="clusterK" type="number" min="4" max="30" value="${state.enrich.k || 18}"
+                   ${state.enrich.running ? "disabled" : ""}>
+          </label>
           ${state.enrich.running
             ? `<button class="maint-btn maint-stop" data-studio-action="enrich-stop">Stop after this pass</button>`
             : ""}
@@ -2771,6 +2790,8 @@
     if (action === "ai-save-history") { return saveAiOutputToHistory(); }
     if (action === "enrich-run") {
       const job = e && e.currentTarget && e.currentTarget.dataset.job;
+      const kEl = document.getElementById("clusterK");
+      if (kEl) state.enrich.k = Math.min(30, Math.max(4, parseInt(kEl.value, 10) || 18));
       if (job) runEnrichJob(job);
       return;
     }
