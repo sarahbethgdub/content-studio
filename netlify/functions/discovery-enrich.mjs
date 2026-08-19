@@ -496,6 +496,40 @@ async function nameClusters() {
            named, failures, remaining: todo.length - batch.length, next: "name" };
 }
 
+
+/* ---------------------------------------------------------------------
+   "place" — assign new situations to an EXISTING region.
+
+   The regions themselves come from density clustering run offline: it
+   needs the whole embedding set in memory and far more than the 30
+   seconds Netlify allows, and it only needs redoing when the library has
+   changed enough to have a different shape.
+
+   This is the in-between step. A new situation joins a region if it is
+   genuinely close to one, and stays unplaced otherwise. Leaving things
+   unplaced is the point — forcing every phrase into its nearest region is
+   what turned the largest one into a drain.
+   --------------------------------------------------------------------- */
+async function placeNewPhrases() {
+  const res = await sbRpc("discovery_assign_new", { min_similarity: 0.62, batch_size: 500 });
+  const row = Array.isArray(res) ? res[0] : res;
+  if (!row) return { done: true, assigned: 0, skipped: 0, remaining: 0 };
+
+  if (row.remaining === 0 || (!row.assigned && !row.skipped)) {
+    await sbRpc("discovery_roll_up_pieces", {});
+    const counts = await sbSelectAll("discovery_phrases", { select: "cluster_id" });
+    const tally = {};
+    for (const r of counts) if (r.cluster_id) tally[r.cluster_id] = (tally[r.cluster_id] || 0) + 1;
+    const clusters = await sbSelect("discovery_clusters", { select: "id" });
+    for (const c of clusters) {
+      await sbPatch("discovery_clusters", { id: `eq.${c.id}` }, { piece_count: tally[c.id] || 0 });
+    }
+    return { done: true, assigned: row.assigned || 0, skipped: row.skipped || 0, remaining: 0 };
+  }
+  return { done: false, assigned: row.assigned || 0, skipped: row.skipped || 0,
+           remaining: row.remaining };
+}
+
 export default async (req) => {
   if (req.method !== "POST") return json({ error: "POST only" }, 405);
 
@@ -511,7 +545,10 @@ export default async (req) => {
     if (job === "chunks")     return json(await backfillChunks(user.id));
     if (job === "phrases")    return json(await buildPhrases());
     if (job === "situations") return json(await embedSituations());
-    if (job === "clusters")   return json(await buildClusters(Math.min(30, Math.max(4, body.k || 18))));
+    if (job === "place")      return json(await placeNewPhrases());
+    // "clusters" is deliberately gone: it ran k-means, which would delete
+    // the density-clustered regions. Re-clustering is an offline job.
+    if (job === "clusters")   return json({ error: "Regions are built offline now. Use Place new situations." }, 400);
     if (job === "assign")     return json(await assignPhrases());
     if (job === "name")       return json(await nameClusters());
     return json({ error: `unknown job: ${job}` }, 400);
