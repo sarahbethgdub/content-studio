@@ -76,7 +76,14 @@ export async function sbRpc(fn, args) {
     method: "POST", headers: sbHeaders(true), body: JSON.stringify(args),
   });
   if (!r.ok) throw new Error(`rpc ${fn}: ${r.status} ${(await r.text()).slice(0, 200)}`);
-  return r.json();
+  // A function returning void answers 204 with no body. Parsing that as
+  // JSON throws "Unexpected end of JSON input", which reads like a broken
+  // endpoint rather than a successful call that had nothing to say.
+  if (r.status === 204) return null;
+  const text = await r.text();
+  if (!text.trim()) return null;
+  try { return JSON.parse(text); }
+  catch (e) { throw new Error(`rpc ${fn}: bad JSON — ${text.slice(0, 160)}`); }
 }
 
 /* ---------- Embeddings ---------- */
