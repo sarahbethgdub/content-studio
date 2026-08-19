@@ -8,14 +8,18 @@ import { sbSelect, json, CORS } from "./_lib/common.js";
 export default async (req) => {
   if (req.method === "OPTIONS") return new Response("", { status: 204, headers: CORS });
   try {
-    const [situations, clusters, counts] = await Promise.all([
+    const [situations, clusters, pieces] = await Promise.all([
       sbSelect("discovery_situations", {
         select: "slug,label", active: "is.true", order: "sort_order.asc",
       }),
       sbSelect("discovery_clusters", {
         select: "id,name,blurb,x,y,colour,piece_count", order: "piece_count.desc",
       }),
-      sbSelect("pieces", { select: "id", limit: "1" }),
+      sbSelect("pieces", {
+        select: "id,title,url",
+        cluster_id: "not.is.null",
+        limit: "1000",
+      }),
     ]);
 
     // Points for the map are SITUATIONS, not pieces. Each dot is a
