@@ -15,7 +15,7 @@
    Nothing here runs while a visitor is on the page.
    ===================================================================== */
 import {
-  sbSelect, sbPatch, sbInsert, embed, claude, parseJson,
+  sbSelect, sbSelectAll, sbPatch, sbInsert, embed, claude, parseJson,
   cosine, parseVector, json, requireUser,
 } from "./_lib/common.js";
 
@@ -89,7 +89,7 @@ Three or four situations. Each under 90 characters. The reader note under 180 ch
     else failures.push({ id: rows[i].id, title: rows[i].title, error: String(r.reason).slice(0, 160) });
   });
 
-  const left = await sbSelect("pieces", { select: "id", enriched_at: "is.null", limit: "1000" });
+  const left = await sbSelectAll("pieces", { select: "id", enriched_at: "is.null" });
   return { done: left.length === 0, processed: ok, remaining: left.length, failures };
 }
 
@@ -137,12 +137,13 @@ async function backfillChunks(userId) {
   // Deliberately light queries first. Pulling every piece WITH its content
   // is ~3.6M characters and blows the function timeout before any work
   // starts, so ids come first and content only for the chosen batch.
-  const have = await sbSelect("piece_chunks", { select: "piece_id", limit: "100000" });
+  // MUST be paged: 1454+ chunk rows, and PostgREST returns at most 1000.
+  // Reading a partial set here makes already-chunked pieces look unchunked,
+  // which then fails on the (piece_id, chunk_index) unique constraint.
+  const have = await sbSelectAll("piece_chunks", { select: "piece_id" });
   const done = new Set(have.map((r) => r.piece_id));
 
-  const ids = await sbSelect("pieces", {
-    select: "id,char_count", order: "char_count.desc", limit: "2000",
-  });
+  const ids = await sbSelectAll("pieces", { select: "id,char_count", order: "char_count.desc" });
   const pending = ids.filter((p) => !done.has(p.id));
 
   if (!pending.length) {
@@ -179,12 +180,17 @@ async function backfillChunks(userId) {
     else failures.push({ id: rows[i].id, title: rows[i].title, error: String(r.reason).slice(0, 160) });
   });
 
+  // If every piece in a batch failed, stop rather than retrying the same
+  // five forever — that means something systemic, not a transient error.
+  const allFailed = failures.length === rows.length && rows.length > 0;
+
   return {
-    done: pending.length - rows.length <= 0,
-    processed: rows.length,
+    done: allFailed || (pending.length - rows.length <= 0),
+    processed: rows.length - failures.length,
     chunks_created: made,
     remaining: pending.length - rows.length,
     failures,
+    ...(allFailed ? { error: "Every piece in this batch failed — stopping." } : {}),
   };
 }
 
