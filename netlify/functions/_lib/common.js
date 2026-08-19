@@ -8,8 +8,13 @@ const SERVICE_KEY  = process.env.SUPABASE_SERVICE_KEY;
 const OPENAI_KEY   = process.env.OPENAI_API_KEY;
 const ANTHROPIC_KEY = process.env.ANTHROPIC_API_KEY;
 
-// Must match whatever produced the existing 1536-dim vectors.
+// Verified empirically against the live index (detect_embedding.py, cosine
+// 1.0000 on three samples): text-embedding-3-small, input formatted as
+// `${title}\n\n${content}`, truncated at 8000 characters.
+// ada-002 scores ~0.00 against these vectors — same dimensions, different
+// space — so this must not drift.
 const EMBED_MODEL = process.env.EMBED_MODEL || "text-embedding-3-small";
+export const EMBED_TRUNCATE = 8000;
 const CLAUDE_MODEL = process.env.CLAUDE_MODEL || "claude-sonnet-4-6";
 
 const SCHEMA = "content_studio";
