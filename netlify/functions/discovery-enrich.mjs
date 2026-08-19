@@ -443,32 +443,48 @@ Rules:
     colour: PALETTE[i % PALETTE.length], piece_count: 0,
   })));
 
-  // Postgres assigns every phrase and rolls each piece up to its modal
-  // region. Batched, because a single statement over the whole set exceeds
-  // the timeout PostgREST applies.
+  // Assignment happens in its own request. Netlify's gateway gives a
+  // synchronous function 30 seconds; sampling + k-means + 18 Claude calls
+  // already uses most of that, so writing 2,673 assignments on top of it
+  // does not fit. The panel chains the next call.
   await sbRpc("discovery_clear_assignments", {});
-  let assigned = 0;
-  for (let round = 0; round < 20; round++) {
-    const res = await sbRpc("discovery_assign_phrases", { batch_size: 800 });
-    const row = Array.isArray(res) ? res[0] : res;
-    assigned += (row && row.assigned) || 0;
-    if (!row || row.remaining === 0 || !row.assigned) break;
+
+  return {
+    stage: "named",
+    clusters: inserted.map((row, i) => ({ name: row.name, sample: live[i].sample })),
+    sampled: n,
+    next: "assign",
+  };
+}
+
+/* Assign phrases to the regions just created. Batched; call until done. */
+async function assignPhrases() {
+  const res = await sbRpc("discovery_assign_phrases", { batch_size: 700 });
+  const row = Array.isArray(res) ? res[0] : res;
+  const remaining = (row && row.remaining) || 0;
+
+  if (remaining > 0) {
+    return { stage: "assigning", assigned: (row && row.assigned) || 0,
+             remaining, done: false, next: "assign" };
   }
 
-  // Fill in real counts
+  // Everything placed — write the real counts onto each region.
   const counts = await sbSelectAll("discovery_phrases", { select: "cluster_id" });
   const tally = {};
   for (const r of counts) if (r.cluster_id) tally[r.cluster_id] = (tally[r.cluster_id] || 0) + 1;
-  for (const row of inserted) {
-    await sbPatch("discovery_clusters", { id: `eq.${row.id}` }, { piece_count: tally[row.id] || 0 });
+
+  const clusters = await sbSelect("discovery_clusters", { select: "id,name" });
+  for (const c of clusters) {
+    await sbPatch("discovery_clusters", { id: `eq.${c.id}` }, { piece_count: tally[c.id] || 0 });
   }
 
   return {
-    clusters: inserted.map((row, i) => ({
-      name: row.name, count: tally[row.id] || 0, sample: live[i].sample,
-    })).sort((a, b) => b.count - a.count),
-    phrases_assigned: assigned,
-    sampled: n,
+    stage: "done",
+    done: true,
+    assigned: (row && row.assigned) || 0,
+    remaining: 0,
+    clusters: clusters.map((c) => ({ name: c.name, count: tally[c.id] || 0 }))
+                      .sort((a, b) => b.count - a.count),
   };
 }
 
@@ -488,6 +504,7 @@ export default async (req) => {
     if (job === "phrases")    return json(await buildPhrases());
     if (job === "situations") return json(await embedSituations());
     if (job === "clusters")   return json(await buildClusters(Math.min(30, Math.max(4, body.k || 18))));
+    if (job === "assign")     return json(await assignPhrases());
     return json({ error: `unknown job: ${job}` }, 400);
   } catch (e) {
     return json({ error: String(e).slice(0, 400) }, 500);
