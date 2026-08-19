@@ -177,10 +177,33 @@ export function parseVector(v) {
 }
 
 /* ---------- HTTP helpers ---------- */
+/** ALLOWED_ORIGIN may be a comma-separated list. The matching origin is
+ *  echoed back, because a browser rejects a wildcard on a preflighted
+ *  request and refuses a list. Anything unrecognised falls back to the
+ *  first entry, which fails closed.
+ *
+ *  Note: a page opened from disk sends Origin: null, so local testing
+ *  needs "null" in the list — or just test on the real page. */
+export function corsFor(req) {
+  const allowed = (process.env.ALLOWED_ORIGIN || "*")
+    .split(",").map((s) => s.trim()).filter(Boolean);
+  const origin = (req && req.headers && req.headers.get("origin")) || "";
+  const match = allowed.includes("*") ? "*"
+              : (allowed.includes(origin) ? origin : allowed[0]);
+  return {
+    "Access-Control-Allow-Origin": match,
+    "Access-Control-Allow-Headers": "Content-Type",
+    "Access-Control-Allow-Methods": "POST, OPTIONS",
+    "Vary": "Origin",
+  };
+}
+
+// Kept for callers that don't have the request to hand.
 export const CORS = {
-  "Access-Control-Allow-Origin": process.env.ALLOWED_ORIGIN || "*",
+  "Access-Control-Allow-Origin": (process.env.ALLOWED_ORIGIN || "*").split(",")[0].trim(),
   "Access-Control-Allow-Headers": "Content-Type",
   "Access-Control-Allow-Methods": "POST, OPTIONS",
+  "Vary": "Origin",
 };
 
 export function json(body, status = 200, extra = {}) {
