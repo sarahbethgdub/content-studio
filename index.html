@@ -243,8 +243,8 @@
                   note: "Lifts every situation into its own embedded row. These are what the map clusters." },
     pieces:     { label: "Write reader notes", loops: true,
                   note: "Claude writes situations, a reader note and a pull quote per piece." },
-    clusters:   { label: "Build the map",      loops: false,
-                  note: "Groups the library and names each region. Run last. Safe to re-run with a different region count." },
+    place:      { label: "Place new situations", loops: true,
+                  note: "Assigns any new situations to an existing region, or leaves them unplaced if they're not close to one. Run after adding pieces." },
   };
 
   function enrichLog(line) {
@@ -274,54 +274,20 @@
       while (true) {
         pass++;
         const t0 = Date.now();
-        const body = { job };
-        if (job === "clusters") body.k = state.enrich.k || 18;
-        const data = await studioApiJson("/api/discovery-enrich", body);
+        const data = await studioApiJson("/api/discovery-enrich", { job });
         const secs = ((Date.now() - t0) / 1000).toFixed(1);
 
         if (data.error) { enrichLog(`ERROR ${data.error}`); break; }
 
         if (job === "situations") { enrichLog(`Embedded ${data.embedded} situations. Done.`); break; }
 
-        if (job === "clusters") {
-          enrichLog(`${data.regions} regions found from a sample of ${data.sampled} situations.`);
-          enrichLog("Placing every situation…");
-
-          // Three separate requests: Netlify kills a synchronous function at
-          // 30s, and clustering + assigning + naming together is well past it.
-          let guard = 0, ok = true;
-          while (guard++ < 40) {
-            const a = await studioApiJson("/api/discovery-enrich", { job: "assign" });
-            if (a.error) { enrichLog(`ERROR ${a.error}`); ok = false; break; }
-            if (a.done) { enrichLog("All situations placed."); break; }
-            enrichLog(`   ${a.remaining} left…`);
-            if (state.enrich.stop) { enrichLog("Stopped. Re-run Build the map."); ok = false; break; }
-            await new Promise(r => setTimeout(r, 200));
-          }
-
-          if (ok) {
-            enrichLog("Naming the regions…");
-            guard = 0;
-            while (guard++ < 12) {
-              const nres = await studioApiJson("/api/discovery-enrich", { job: "name" });
-              if (nres.error) { enrichLog(`ERROR ${nres.error}`); break; }
-              (nres.named || []).forEach(x => {
-                enrichLog(`   ${x.name}`);
-                (x.sample || []).forEach(sx => enrichLog(`        ${sx}`));
-              });
-              (nres.failures || []).forEach(fx => enrichLog(`   naming failed: ${fx.error}`));
-              if (nres.done) {
-                if (nres.clusters) {
-                  enrichLog("Final regions:");
-                  nres.clusters.forEach(c => enrichLog(`   ${String(c.count).padStart(5)}  ${c.name}`));
-                }
-                break;
-              }
-              if (state.enrich.stop) { enrichLog("Stopped mid-naming."); break; }
-              await new Promise(r => setTimeout(r, 200));
-            }
-          }
-          break;
+        if (job === "place") {
+          const placed = data.assigned || 0, skipped = data.skipped || 0;
+          enrichLog(`Pass ${pass}: ${placed} placed, ${skipped} not close enough to any region, ${data.remaining} left`);
+          if (data.done || (!placed && !skipped)) { enrichLog("Done."); break; }
+          if (state.enrich.stop) { enrichLog("Stopped."); break; }
+          await new Promise(r => setTimeout(r, 250));
+          continue;
         }
 
         totalDone += (data.processed || 0);
@@ -2014,8 +1980,8 @@
                   note: "Lifts every situation into its own embedded row. These are what the map clusters." },
     pieces:     { label: "Write reader notes", loops: true,
                   note: "Claude writes situations, a reader note and a pull quote per piece." },
-    clusters:   { label: "Build the map",      loops: false,
-                  note: "Groups the library and names each region. Run last. Safe to re-run with a different region count." },
+    place:      { label: "Place new situations", loops: true,
+                  note: "Assigns any new situations to an existing region, or leaves them unplaced if they're not close to one. Run after adding pieces." },
   };
 
   function enrichLog(line) {
@@ -2045,9 +2011,7 @@
       while (true) {
         pass++;
         const t0 = Date.now();
-        const body = { job };
-        if (job === "clusters") body.k = state.enrich.k || 18;
-        const data = await studioApiJson("/api/discovery-enrich", body);
+        const data = await studioApiJson("/api/discovery-enrich", { job });
         const secs = ((Date.now() - t0) / 1000).toFixed(1);
 
         if (data.error) { enrichLog(`ERROR ${data.error}`); break; }
@@ -2074,7 +2038,7 @@
               break;
             }
             enrichLog(`   ${a.remaining} situations left to place…`);
-            if (state.enrich.stop) { enrichLog("Stopped mid-assignment — re-run Build the map."); break; }
+            if (state.enrich.stop) { enrichLog("Stopped mid-assignment."); break; }
             await new Promise(r => setTimeout(r, 250));
           }
           break;
@@ -2447,10 +2411,6 @@
               ${state.enrich.job === id ? "Running…" : escapeHtml(j.label)}
             </button>
           `).join("")}
-          <label class="maint-k">regions
-            <input id="clusterK" type="number" min="4" max="30" value="${state.enrich.k || 18}"
-                   ${state.enrich.running ? "disabled" : ""}>
-          </label>
           ${state.enrich.running
             ? `<button class="maint-btn maint-stop" data-studio-action="enrich-stop">Stop after this pass</button>`
             : ""}
@@ -2849,8 +2809,6 @@
     if (action === "ai-save-history") { return saveAiOutputToHistory(); }
     if (action === "enrich-run") {
       const job = e && e.currentTarget && e.currentTarget.dataset.job;
-      const kEl = document.getElementById("clusterK");
-      if (kEl) state.enrich.k = Math.min(30, Math.max(4, parseInt(kEl.value, 10) || 18));
       if (job) runEnrichJob(job);
       return;
     }
