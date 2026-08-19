@@ -163,7 +163,7 @@
         if (!c) return "";
         return '<circle cx="' + (p.x * W).toFixed(1) + '" cy="' + (p.y * H).toFixed(1) +
           '" r="' + (p.big ? 5 : 3.2) + '" fill="' + esc(c.colour || "#CCA33E") +
-          '" opacity="' + (p.big ? .85 : .5) + '" data-t="' + esc(p.t) + '" data-u="' + esc(p.u) + '"></circle>';
+          '" opacity="' + (p.big ? .85 : .5) + '" data-t="' + esc(p.t) + '" data-pt="' + esc(p.pt || "") + '" data-u="' + esc(p.u) + '"></circle>';
       }).join("") +
       m.clusters.map(function (c) {
         var lx = (c.x * W).toFixed(0), ly = (c.y * H - 52).toFixed(0);
@@ -173,9 +173,9 @@
                '" text-anchor="middle">' + c.piece_count + " pieces</text>";
       }).join("") +
       '</svg><div class="tip" id="tip"></div></div>' +
-      '<div class="maphint">' + m.total + " pieces across " + m.clusters.length +
-      " regions, grouped by the situations they speak to rather than by category. " +
-      "Hover a region name to see what's in it; hover a point for its title; click to read.</div>";
+      '<div class="maphint">' + (m.situation_count || m.points.length) + " situations drawn from " +
+      m.total + " pieces, grouped into " + m.clusters.length + " regions. " +
+      "Every dot is something someone might be dealing with. Hover to read it, click to open the piece.</div>";
   }
 
   function paint() {
@@ -234,13 +234,14 @@
 
       root.querySelectorAll("svg circle").forEach(function (c) {
         c.onmouseenter = function (e) {
-          tip.textContent = c.dataset.t;
+          tip.innerHTML = "<strong>" + esc(c.dataset.t) + "</strong>" +
+            (c.dataset.pt ? "<em>" + esc(c.dataset.pt) + "</em>" : "");
           tip.style.left = (e.offsetX + 14) + "px";
           tip.style.top = (e.offsetY + 8) + "px";
           tip.classList.add("on");
         };
         c.onmouseleave = function () { tip.classList.remove("on"); };
-        c.onclick = function () { if (c.dataset.u) { track("open_piece", c.dataset.t); window.location.href = c.dataset.u; } };
+        c.onclick = function () { if (c.dataset.u) { track("open_piece", c.dataset.pt || c.dataset.t); window.location.href = c.dataset.u; } };
       });
     }
   }
