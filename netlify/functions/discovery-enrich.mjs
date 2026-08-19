@@ -9,13 +9,15 @@
                   again whenever you add or reword a situation)
      "chunks"     split unchunked pieces into passages and embed them, so
                   the whole library is searchable at passage level
+     "phrases"    lift each situation into its own embedded row — these are
+                  what the map clusters, not the pieces themselves
      "clusters"   group the library by embedding, name each group with
                   Claude, store centroids and 2D coordinates
 
    Nothing here runs while a visitor is on the page.
    ===================================================================== */
 import {
-  sbSelect, sbSelectAll, sbPatch, sbInsert, embed, claude, parseJson,
+  sbSelect, sbSelectAll, sbPatch, sbInsert, sbRpc, embed, claude, parseJson,
   cosine, parseVector, json, requireUser,
 } from "./_lib/common.js";
 
@@ -195,6 +197,58 @@ async function backfillChunks(userId) {
   };
 }
 
+
+/* ---------------------------------------------------------------------
+   "phrases" — lift every situation into its own row and embed it.
+   These become the units of clustering. ~2,400 of them across the
+   library, at roughly a cent to embed the lot.
+   --------------------------------------------------------------------- */
+const PHRASE_BATCH = 180;
+
+async function buildPhrases() {
+  const existing = await sbSelectAll("discovery_phrases", { select: "piece_id,phrase" });
+  const seen = new Set(existing.map((r) => r.piece_id + "\u0000" + r.phrase));
+
+  const pieces = await sbSelectAll("pieces", {
+    select: "id,user_id,situations", situations: "not.is.null",
+  });
+
+  const wanted = [];
+  for (const p of pieces) {
+    for (const raw of (p.situations || [])) {
+      const phrase = String(raw || "").trim();
+      if (!phrase || phrase.length < 12) continue;
+      if (seen.has(p.id + "\u0000" + phrase)) continue;
+      wanted.push({ piece_id: p.id, user_id: p.user_id, phrase });
+    }
+  }
+
+  if (!wanted.length) {
+    const unembedded = await sbSelectAll("discovery_phrases", {
+      select: "id,phrase", embedding: "is.null",
+    });
+    if (!unembedded.length) {
+      return { done: true, processed: 0, remaining: 0, total_phrases: existing.length };
+    }
+    const slice = unembedded.slice(0, PHRASE_BATCH);
+    const vecs = await embed(slice.map((r) => r.phrase));
+    for (let i = 0; i < slice.length; i++) {
+      await sbPatch("discovery_phrases", { id: `eq.${slice[i].id}` }, { embedding: vecs[i] });
+    }
+    return { done: unembedded.length <= slice.length, processed: slice.length,
+             remaining: unembedded.length - slice.length, phase: "embedding" };
+  }
+
+  const slice = wanted.slice(0, PHRASE_BATCH);
+  const vecs = await embed(slice.map((r) => r.phrase));
+  await sbInsert("discovery_phrases", slice.map((r, i) => ({
+    piece_id: r.piece_id, phrase: r.phrase, embedding: vecs[i],
+  })));
+
+  return { done: wanted.length <= slice.length, processed: slice.length,
+           remaining: wanted.length - slice.length, phase: "extracting" };
+}
+
 async function embedSituations() {
   const sits = await sbSelect("discovery_situations", { select: "id,slug,prompt_text", active: "is.true" });
   if (!sits.length) return { embedded: 0 };
@@ -205,145 +259,175 @@ async function embedSituations() {
   return { embedded: sits.length };
 }
 
-/* k-means over the library embeddings, then Claude names each group from the
-   SITUATIONS of its members — not from titles or arguments. Naming from the
-   argument produced aphorisms ("Risk before the bet") that read well and told
-   a visitor nothing. Situations are already phrased as predicaments, which is
-   what a region label has to be: recognisable before you click.
+/* ---------------------------------------------------------------------
+   "clusters" — k-means over SITUATION PHRASES, not pieces.
 
-   Navigation and index pages are excluded. Left in, they formed their own
-   cluster of About/Team/Contact pages that Claude gamely named "Trust before
-   contact" — a real cluster of nothing. */
-const MIN_CLUSTER_CHARS = 1200;
-const EXCLUDE_CATEGORIES = ["Site page", "Media", "Content Library", "Resources & Tools"];
+   Clustering pieces grouped them by register: the Unqualified Opinions
+   archive formed one cluster because those pieces sound alike, not
+   because they are about the same thing. Phrases have no voice to
+   detect, so what survives is subject and circumstance.
+
+   Centroids are found on a deterministic sample so the payload stays
+   small; every phrase is then assigned by Postgres via pgvector, which
+   keeps 2,400 x 1536 floats out of this function entirely.
+   --------------------------------------------------------------------- */
+const CLUSTER_SAMPLE = 900;
+
+function toUnitVectors(list) {
+  const dim = list[0].length;
+  const flat = new Float32Array(list.length * dim);
+  for (let i = 0; i < list.length; i++) {
+    const v = list[i];
+    let norm = 0;
+    for (let j = 0; j < dim; j++) norm += v[j] * v[j];
+    norm = Math.sqrt(norm) || 1;
+    for (let j = 0; j < dim; j++) flat[i * dim + j] = v[j] / norm;
+  }
+  return { flat, dim, n: list.length };
+}
+
+function dot(flat, dim, i, centroid) {
+  let acc = 0;
+  const off = i * dim;
+  for (let j = 0; j < dim; j++) acc += flat[off + j] * centroid[j];
+  return acc;
+}
 
 async function buildClusters(k = 18) {
-  const rows = [];
-  for (let off = 0; ; off += 250) {
-    const page = await sbSelect("pieces", {
-      select: "id,title,category,reader_note,situations,char_count,embedding",
-      embedding: "not.is.null",
-      order: "id.asc", offset: String(off), limit: "250",
-    });
-    rows.push(...page);
-    if (page.length < 250) break;
+  const sample = await sbRpc("discovery_phrase_sample", { sample_size: CLUSTER_SAMPLE });
+  if (!sample || sample.length < k * 8) {
+    throw new Error(`only ${sample ? sample.length : 0} embedded phrases — run the phrases job first`);
   }
 
-  const eligible = rows.filter((r) =>
-    (r.char_count || 0) >= MIN_CLUSTER_CHARS &&
-    !EXCLUDE_CATEGORIES.includes(r.category));
+  const { flat, dim, n } = toUnitVectors(sample.map((r) => parseVector(r.embedding)));
 
-  if (eligible.length < k * 4) throw new Error(`only ${eligible.length} eligible pieces for k=${k}`);
-
-  const vecs = eligible.map((r) => parseVector(r.embedding));
-  const dim = vecs[0].length;
-
-  let seed = 20260818;
+  // k-means++ seeding, deterministic
+  let seed = 20260819;
   const rnd = () => (seed = (seed * 16807) % 2147483647) / 2147483647;
-  let centroids = [vecs[Math.floor(rnd() * vecs.length)]];
+  const centroids = [];
+  const first = Math.floor(rnd() * n);
+  centroids.push(Float32Array.from(flat.subarray(first * dim, first * dim + dim)));
   while (centroids.length < k) {
-    const d = vecs.map((v) => Math.min(...centroids.map((c) => 1 - cosine(v, c))));
-    const total = d.reduce((a, b) => a + b, 0);
-    let t = rnd() * total, idx = 0;
-    while (t > 0 && idx < d.length - 1) { t -= d[idx]; idx++; }
-    centroids.push(vecs[idx]);
+    let best = 0, bestD = -1;
+    for (let i = 0; i < n; i++) {
+      let nearest = -2;
+      for (const c of centroids) { const d = dot(flat, dim, i, c); if (d > nearest) nearest = d; }
+      const dist = (1 - nearest) * (0.5 + rnd());
+      if (dist > bestD) { bestD = dist; best = i; }
+    }
+    centroids.push(Float32Array.from(flat.subarray(best * dim, best * dim + dim)));
   }
 
-  let assign = new Array(vecs.length).fill(-1);
-  for (let iter = 0; iter < 30; iter++) {
+  const assign = new Int16Array(n).fill(-1);
+  for (let iter = 0; iter < 18; iter++) {
     let moved = 0;
-    vecs.forEach((v, i) => {
+    for (let i = 0; i < n; i++) {
       let best = 0, bestSim = -2;
-      centroids.forEach((c, ci) => { const sim = cosine(v, c); if (sim > bestSim) { bestSim = sim; best = ci; } });
+      for (let c = 0; c < k; c++) {
+        const sim = dot(flat, dim, i, centroids[c]);
+        if (sim > bestSim) { bestSim = sim; best = c; }
+      }
       if (assign[i] !== best) { assign[i] = best; moved++; }
-    });
-    centroids = centroids.map((_, ci) => {
-      const members = vecs.filter((_, i) => assign[i] === ci);
-      if (!members.length) return centroids[ci];
-      const mean = new Array(dim).fill(0);
-      members.forEach((m) => { for (let j = 0; j < dim; j++) mean[j] += m[j]; });
-      return mean.map((x) => x / members.length);
-    });
+    }
+    for (let c = 0; c < k; c++) {
+      const mean = new Float32Array(dim);
+      let count = 0;
+      for (let i = 0; i < n; i++) {
+        if (assign[i] !== c) continue;
+        count++;
+        const off = i * dim;
+        for (let j = 0; j < dim; j++) mean[j] += flat[off + j];
+      }
+      if (!count) continue;
+      let norm = 0;
+      for (let j = 0; j < dim; j++) { mean[j] /= count; norm += mean[j] * mean[j]; }
+      norm = Math.sqrt(norm) || 1;
+      for (let j = 0; j < dim; j++) mean[j] /= norm;
+      centroids[c] = mean;
+    }
     if (!moved) break;
   }
 
-  const groups = [];
-  for (let ci = 0; ci < k; ci++) {
-    const members = eligible
-      .map((r, i) => ({ r, i }))
-      .filter(({ i }) => assign[i] === ci)
-      .map(({ r, i }) => ({ ...r, sim: cosine(vecs[i], centroids[ci]) }))
-      .sort((a, b) => b.sim - a.sim);
-    groups.push({ ci, members });
+  // Representative phrases per cluster, for naming
+  const byCluster = [];
+  for (let c = 0; c < k; c++) byCluster.push([]);
+  for (let i = 0; i < n; i++) {
+    byCluster[assign[i]].push({ id: sample[i].id, sim: dot(flat, dim, i, centroids[assign[i]]) });
   }
 
-  const NAME_SYSTEM = `You label regions of a business writing library.
+  const ids = byCluster.flatMap((rows) =>
+    rows.sort((a, b) => b.sim - a.sim).slice(0, 26).map((r) => r.id));
+  const textRows = ids.length
+    ? await sbSelect("discovery_phrases", { select: "id,phrase", id: `in.(${ids.join(",")})` })
+    : [];
+  const textById = {};
+  for (const r of textRows) textById[r.id] = r.phrase;
 
-You will be shown the SITUATIONS the pieces in one region address — phrases describing what a reader is going through.
+  const NAME_SYSTEM = `You label regions of a library so a reader can tell, at a glance, whether what they are dealing with lives there.
 
-A label names a MOMENT or a DECISION the reader is inside. It is not a subject heading.
+You will be shown SITUATIONS — short phrases describing what a reader is going through. They all belong to one region.
 
-The failure to avoid is a topic label wearing friendly words. These are all WRONG:
-  "Hiring and managing your team"   (a department, not a moment)
-  "Buying or selling a business"    (a category)
-  "How you price what you sell"     (a subject heading)
-  "Running and growing the business" (means nothing)
-Also wrong, in the other direction — aphorisms that sound good and say nothing:
-  "Risk before the bet", "Courage over comfort"
+A label names the moment or the doubt these readers share. It is not a subject heading.
 
-These are RIGHT, and came from this same library:
+WRONG, because they are department names any firm could use:
+  "Hiring and managing your team"   "Buying or selling a business"
+  "How you price what you sell"     "Running and growing the business"
+WRONG, because they are aphorisms that sound good and say nothing:
+  "Risk before the bet"   "Courage over comfort"
+WRONG, because they describe the writing rather than the reader:
+  "What I actually think"   "What it's like from inside"
+
+RIGHT:
   "The financial call you're sitting on"
   "When things get weird at work"
-  "How your body actually works"
+  "Who takes over when you're gone"
 
-Test before answering: could this label be a nav item on any consulting firm's website? If yes, it is wrong. Rewrite it as the moment the reader is in.
+Test before answering: could this be a nav item on any consulting firm's website? If yes, rewrite it as the moment the reader is in.
 
 Rules:
-- 4-7 words. Plain speech.
-- Name the moment, the decision, or the doubt. Never the domain.
-- No gerund-plus-noun department names ("Hiring and managing…", "Running and growing…").
-- No abstractions: clarity, courage, discipline, alignment, trust, excellence.
-- If two regions would get similar names, make each one narrower and more specific — do not settle for a vaguer label that covers both.
-- The blurb is one sentence addressed to the reader, naming what they are trying to work out.
+- 4-7 words, plain speech, addressed to or about the reader.
+- Name the moment, decision or doubt. Never the domain, never the tone.
+- No abstractions: clarity, courage, discipline, alignment, trust.
+- Blurb: one sentence to the reader naming what they're trying to work out.
 - Return JSON only.`;
 
-  const named = await Promise.all(groups.map(async (g) => {
-    if (!g.members.length) return null;
-    const sample = g.members.slice(0, 24).map((m) => {
-      const sits = (m.situations || []).slice(0, 3).join("; ");
-      return `- ${m.title}${sits ? `\n    situations: ${sits}` : ""}`;
-    }).join("\n");
-
+  const named = await Promise.all(byCluster.map(async (rows, c) => {
+    if (rows.length < 3) return null;
+    const phrases = rows.slice(0, 26).map((r) => textById[r.id]).filter(Boolean);
+    if (phrases.length < 3) return null;
     const out = parseJson(await claude(NAME_SYSTEM,
-      `Pieces in this region:\n\n${sample}\n\nReturn: {"name": "...", "blurb": "..."}`, 300));
-    return { ci: g.ci, name: out.name, blurb: out.blurb, count: g.members.length,
-             samples: g.members.slice(0, 3).map((m) => m.title) };
+      `Situations in this region:\n\n${phrases.map((p) => "- " + p).join("\n")}\n\n` +
+      `Return: {"name": "...", "blurb": "..."}`, 300));
+    return { c, name: out.name, blurb: out.blurb, sample: phrases.slice(0, 3) };
   }));
 
   const live = named.filter(Boolean);
 
-  // Lay centroids out in 2D, pushing dissimilar regions apart. More regions
-  // need more relaxation passes to stop labels piling up.
+  // 2D layout: push dissimilar regions apart
   const pts = live.map((_, i) => ({
     x: 0.5 + 0.34 * Math.cos((i / live.length) * Math.PI * 2),
     y: 0.5 + 0.32 * Math.sin((i / live.length) * Math.PI * 2),
   }));
   for (let step = 0; step < 600; step++) {
     for (let a = 0; a < live.length; a++) for (let b = a + 1; b < live.length; b++) {
-      const want = Math.max(0.22, 1 - cosine(centroids[live[a].ci], centroids[live[b].ci]));
+      let sim = 0;
+      const ca = centroids[live[a].c], cb = centroids[live[b].c];
+      for (let j = 0; j < dim; j++) sim += ca[j] * cb[j];
+      const want = Math.max(0.24, 1 - sim);
       const dx = pts[b].x - pts[a].x, dy = pts[b].y - pts[a].y;
       const dist = Math.hypot(dx, dy) || 1e-6;
-      const push = (want * 0.55 - dist) * 0.04;
+      const push = (want * 0.58 - dist) * 0.04;
       pts[a].x -= (dx / dist) * push; pts[a].y -= (dy / dist) * push;
       pts[b].x += (dx / dist) * push; pts[b].y += (dy / dist) * push;
     }
   }
   const xs = pts.map((p) => p.x), ys = pts.map((p) => p.y);
   const nx = (v) => 0.10 + 0.80 * (v - Math.min(...xs)) / ((Math.max(...xs) - Math.min(...xs)) || 1);
-  const ny = (v) => 0.13 + 0.74 * (v - Math.min(...ys)) / ((Math.max(...ys) - Math.min(...ys)) || 1);
+  const ny = (v) => 0.14 + 0.72 * (v - Math.min(...ys)) / ((Math.max(...ys) - Math.min(...ys)) || 1);
 
   const PALETTE = ["#CCA33E","#4E7A9B","#8A6BA8","#5B8C6E","#B5713F","#A0526D","#3F7C77",
-                   "#7A6A3F","#5C6BA8","#9B5B4E","#4E8C9B","#8C7A3F","#6E5B8C","#3F7C5B"];
+                   "#7A6A3F","#5C6BA8","#9B5B4E","#4E8C9B","#8C7A3F","#6E5B8C","#3F7C5B",
+                   "#A8794E","#5B7C8C","#8C5B6E","#6E8C5B"];
 
   await fetch(`${process.env.SUPABASE_URL}/rest/v1/discovery_clusters?id=gt.0`, {
     method: "DELETE",
@@ -352,26 +436,31 @@ Rules:
                "Content-Profile": "content_studio" },
   });
 
-  const inserted = await sbInsert("discovery_clusters", live.map((n, i) => ({
-    name: n.name, blurb: n.blurb, centroid: centroids[n.ci],
+  const inserted = await sbInsert("discovery_clusters", live.map((r, i) => ({
+    name: r.name, blurb: r.blurb,
+    centroid: Array.from(centroids[r.c]),
     x: nx(pts[i].x), y: ny(pts[i].y),
-    colour: PALETTE[i % PALETTE.length], piece_count: n.count,
+    colour: PALETTE[i % PALETTE.length], piece_count: 0,
   })));
 
-  // Clear old assignments, then assign in bulk — one write per region.
-  await sbPatch("pieces", { cluster_id: "not.is.null" }, { cluster_id: null });
-  for (let i = 0; i < live.length; i++) {
-    const clusterRow = inserted[i];
-    if (!clusterRow) continue;
-    const ids = eligible.filter((_, j) => assign[j] === live[i].ci).map((r) => r.id);
-    for (let j = 0; j < ids.length; j += 150) {
-      await sbPatch("pieces", { id: `in.(${ids.slice(j, j + 150).join(",")})` },
-                    { cluster_id: clusterRow.id });
-    }
+  // Postgres assigns every phrase and rolls each piece up to its modal region.
+  const assigned = await sbRpc("discovery_assign_phrases", {});
+
+  // Fill in real counts
+  const counts = await sbSelectAll("discovery_phrases", { select: "cluster_id" });
+  const tally = {};
+  for (const r of counts) if (r.cluster_id) tally[r.cluster_id] = (tally[r.cluster_id] || 0) + 1;
+  for (const row of inserted) {
+    await sbPatch("discovery_clusters", { id: `eq.${row.id}` }, { piece_count: tally[row.id] || 0 });
   }
 
-  return { clusters: live.map((n) => ({ name: n.name, count: n.count, samples: n.samples })),
-           eligible: eligible.length, excluded: rows.length - eligible.length };
+  return {
+    clusters: inserted.map((row, i) => ({
+      name: row.name, count: tally[row.id] || 0, sample: live[i].sample,
+    })).sort((a, b) => b.count - a.count),
+    phrases_assigned: assigned,
+    sampled: n,
+  };
 }
 
 export default async (req) => {
@@ -387,6 +476,7 @@ export default async (req) => {
   try {
     if (job === "pieces")     return json(await enrichPieces());
     if (job === "chunks")     return json(await backfillChunks(user.id));
+    if (job === "phrases")    return json(await buildPhrases());
     if (job === "situations") return json(await embedSituations());
     if (job === "clusters")   return json(await buildClusters(Math.min(30, Math.max(4, body.k || 18))));
     return json({ error: `unknown job: ${job}` }, 400);
