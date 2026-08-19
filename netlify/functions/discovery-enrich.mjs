@@ -31,6 +31,7 @@ Rules:
 - Situations are phrased from the reader's side and start mid-thought, e.g. "you need to raise prices and expect pushback", "you already know someone has to go".
 - The reader note is one sentence saying who should read this and why now.
 - The pull quote must be copied VERBATIM from the text provided. Do not paraphrase or improve it. If nothing is quotable, return an empty string.
+- CRITICAL: your output must be parseable JSON. If a value contains a double quotation mark, write it as a single quotation mark instead. Never leave an unescaped " inside a string.
 - Return JSON only. No preamble, no code fences.`;
 
 async function enrichPieces() {
