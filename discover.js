@@ -3,7 +3,7 @@
    Served from Netlify, loaded by a four-line Squarespace code block:
 
      <div id="pe-discover"></div>
-     <script src="https://pe-content-studio.netlify.app/discover.js"></script>
+     <script src="https://pe-content-studio.netlify.app/discover.js"><\/script>
 
    Renders into a Shadow DOM, so the site's stylesheet cannot reach in and
    this cannot leak out. Fails silently and invisibly if the API is down —
@@ -98,12 +98,18 @@
     'svg { display: block; width: 100%; height: auto; }',
     'svg circle { cursor: pointer; }',
     'svg circle:hover { opacity: 1 !important; }',
-    '.cl { font-weight: 700; font-size: 11px; fill: #282E3A; letter-spacing: .02em;',
-    '  font-family: "Raleway", sans-serif; }',
+    '.cl { font-weight: 700; font-size: 10.5px; fill: #282E3A; letter-spacing: .01em;',
+    '  font-family: "Raleway", sans-serif; paint-order: stroke; stroke: #F4F4F1;',
+    '  stroke-width: 3px; stroke-linejoin: round; }',
+    '.cl-count { font-weight: 500; font-size: 9.5px; fill: #8A8F99;',
+    '  font-family: ui-monospace, monospace; paint-order: stroke; stroke: #F4F4F1;',
+    '  stroke-width: 3px; }',
+    '.tip strong { display:block; font-family:"Raleway",sans-serif; font-size:12px; margin-bottom:4px; }',
+    '.tip em { display:block; font-style:normal; opacity:.75; }',
     '.tip { position: absolute; pointer-events: none; background: #282E3A; color: #fff;',
     '  font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px;',
-    '  padding: 7px 11px; opacity: 0; transition: opacity 120ms; white-space: nowrap; z-index: 5;',
-    '  max-width: 320px; overflow: hidden; text-overflow: ellipsis; }',
+    '  line-height: 1.5; padding: 9px 12px; opacity: 0; transition: opacity 120ms;',
+    '  z-index: 5; max-width: 330px; }',
     '.tip.on { opacity: 1; }',
     '.maphint { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px;',
     '  color: #8A8F99; margin-top: 12px; max-width: 70ch; line-height: 1.6; }',
@@ -150,7 +156,7 @@
     if (!m || !m.clusters || !m.clusters.length) {
       return '<div class="status">The map hasn\'t been built yet.</div>';
     }
-    var W = 820, H = 440;
+    var W = 900, H = 520;
     return '<div class="mapwrap"><svg viewBox="0 0 ' + W + " " + H + '">' +
       m.points.map(function (p) {
         var c = m.clusters.filter(function (x) { return x.id === p.c; })[0];
@@ -160,12 +166,16 @@
           '" opacity="' + (p.big ? .85 : .5) + '" data-t="' + esc(p.t) + '" data-u="' + esc(p.u) + '"></circle>';
       }).join("") +
       m.clusters.map(function (c) {
-        return '<text class="cl" x="' + (c.x * W).toFixed(0) + '" y="' + (c.y * H - 34).toFixed(0) +
-          '" text-anchor="middle">' + esc(c.name) + "</text>";
+        var lx = (c.x * W).toFixed(0), ly = (c.y * H - 52).toFixed(0);
+        return '<text class="cl" x="' + lx + '" y="' + ly + '" text-anchor="middle"' +
+               ' data-cl="' + c.id + '">' + esc(c.name) + "</text>" +
+               '<text class="cl-count" x="' + lx + '" y="' + (+ly + 13) +
+               '" text-anchor="middle">' + c.piece_count + " pieces</text>";
       }).join("") +
       '</svg><div class="tip" id="tip"></div></div>' +
-      '<div class="maphint">' + m.total + " pieces, grouped by what the writing argues rather than what it's filed under. " +
-      "Region names came from the writing itself. Hover a point; click to read.</div>";
+      '<div class="maphint">' + m.total + " pieces across " + m.clusters.length +
+      " regions, grouped by the situations they speak to rather than by category. " +
+      "Hover a region name to see what's in it; hover a point for its title; click to read.</div>";
   }
 
   function paint() {
@@ -208,6 +218,20 @@
 
     var tip = root.getElementById("tip");
     if (tip) {
+      root.querySelectorAll("svg text.cl").forEach(function (t) {
+        t.onmouseenter = function (e) {
+          var c = (state.meta.clusters || []).filter(function (x) { return String(x.id) === t.dataset.cl; })[0];
+          if (!c) return;
+          tip.innerHTML = "<strong>" + esc(c.name) + "</strong>" +
+            (c.blurb ? "<em>" + esc(c.blurb) + "</em>" : "") +
+            ((c.samples || []).length ? "<em>e.g. " + esc(c.samples.join(" · ")) + "</em>" : "");
+          tip.style.left = (e.offsetX + 14) + "px";
+          tip.style.top = (e.offsetY + 8) + "px";
+          tip.classList.add("on");
+        };
+        t.onmouseleave = function () { tip.classList.remove("on"); };
+      });
+
       root.querySelectorAll("svg circle").forEach(function (c) {
         c.onmouseenter = function (e) {
           tip.textContent = c.dataset.t;
