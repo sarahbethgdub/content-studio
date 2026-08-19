@@ -151,6 +151,46 @@
       }).join("") + "</div></div>";
   }
 
+
+  /* Labels sit at region centres, which on real data means they collide and
+     run off the edges. Estimate each label's box, then nudge them apart
+     vertically until they stop overlapping, and flip the anchor near the
+     edges so nothing gets clipped. */
+  function placeLabels(clusters, W, H) {
+    var CHAR = 5.6, LINE = 26, PAD = 3;
+    var items = clusters.map(function (c) {
+      var w = Math.max(String(c.name).length * CHAR, 46);
+      return { id: c.id, name: c.name, piece_count: c.piece_count,
+               w: w, lx: c.x * W, ly: c.y * H - 46, anchor: "middle" };
+    });
+
+    for (var pass = 0; pass < 90; pass++) {
+      var moved = false;
+      for (var a = 0; a < items.length; a++) {
+        for (var b = a + 1; b < items.length; b++) {
+          var A = items[a], B = items[b];
+          var dx = Math.abs(A.lx - B.lx), dy = Math.abs(A.ly - B.ly);
+          var needX = (A.w + B.w) / 2 + 10, needY = LINE;
+          if (dx < needX && dy < needY) {
+            var shift = (needY - dy) / 2 + PAD;
+            if (A.ly <= B.ly) { A.ly -= shift; B.ly += shift; }
+            else              { A.ly += shift; B.ly -= shift; }
+            moved = true;
+          }
+        }
+      }
+      if (!moved) break;
+    }
+
+    items.forEach(function (it) {
+      it.ly = Math.max(14, Math.min(H - 10, it.ly));
+      if (it.lx - it.w / 2 < 6)      { it.anchor = "start"; it.lx = 6; }
+      else if (it.lx + it.w / 2 > W - 6) { it.anchor = "end";   it.lx = W - 6; }
+      it.lx = Math.round(it.lx); it.ly = Math.round(it.ly);
+    });
+    return items;
+  }
+
   function mapHTML() {
     var m = state.meta;
     if (!m || !m.clusters || !m.clusters.length) {
@@ -165,12 +205,11 @@
           '" r="' + (p.big ? 5 : 3.2) + '" fill="' + esc(c.colour || "#CCA33E") +
           '" opacity="' + (p.big ? .85 : .5) + '" data-t="' + esc(p.t) + '" data-pt="' + esc(p.pt || "") + '" data-u="' + esc(p.u) + '"></circle>';
       }).join("") +
-      m.clusters.map(function (c) {
-        var lx = (c.x * W).toFixed(0), ly = (c.y * H - 52).toFixed(0);
-        return '<text class="cl" x="' + lx + '" y="' + ly + '" text-anchor="middle"' +
+      placeLabels(m.clusters, W, H).map(function (c) {
+        return '<text class="cl" x="' + c.lx + '" y="' + c.ly + '" text-anchor="' + c.anchor + '"' +
                ' data-cl="' + c.id + '">' + esc(c.name) + "</text>" +
-               '<text class="cl-count" x="' + lx + '" y="' + (+ly + 13) +
-               '" text-anchor="middle">' + c.piece_count + " pieces</text>";
+               '<text class="cl-count" x="' + c.lx + '" y="' + (c.ly + 13) +
+               '" text-anchor="' + c.anchor + '">' + c.piece_count + " pieces</text>";
       }).join("") +
       '</svg><div class="tip" id="tip"></div></div>' +
       '<div class="maphint">' + (m.situation_count || m.points.length) + " situations drawn from " +
