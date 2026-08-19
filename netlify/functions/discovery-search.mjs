@@ -36,7 +36,7 @@ async function rateLimited(req) {
 
 export default async (req) => {
   const CORS = corsFor(req);
-  if (req.method === "OPTIONS") return new Response("", { status: 204, headers: CORS });
+  if (req.method === "OPTIONS") return new Response(null, { status: 204, headers: CORS });
   if (req.method !== "POST") return json({ error: "POST only" }, 405, CORS);
 
   let body = {};
@@ -178,4 +178,4 @@ Return: {"0": "why piece 0 is relevant to them", "1": "...", ...} for every inde
   }
 };
 
-export const config = { path: "/api/discovery-search" };
+export const config = { path: "/api/discovery-search", method: ["POST", "OPTIONS"] };

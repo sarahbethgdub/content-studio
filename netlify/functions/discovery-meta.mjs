@@ -7,7 +7,7 @@ import { sbSelect, sbSelectAll, json, corsFor } from "./_lib/common.js";
 
 export default async (req) => {
   const CORS = corsFor(req);
-  if (req.method === "OPTIONS") return new Response("", { status: 204, headers: CORS });
+  if (req.method === "OPTIONS") return new Response(null, { status: 204, headers: CORS });
   try {
     const [situations, clusters, pieces] = await Promise.all([
       sbSelect("discovery_situations", {
@@ -88,4 +88,4 @@ export default async (req) => {
   }
 };
 
-export const config = { path: "/api/discovery-meta" };
+export const config = { path: "/api/discovery-meta", method: ["POST", "OPTIONS"] };
