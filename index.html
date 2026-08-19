@@ -284,27 +284,42 @@
         if (job === "situations") { enrichLog(`Embedded ${data.embedded} situations. Done.`); break; }
 
         if (job === "clusters") {
-          enrichLog(`Regions named (from a sample of ${data.sampled} situations):`);
-          (data.clusters || []).forEach(c => {
-            enrichLog(`   ${c.name}`);
-            (c.sample || []).slice(0, 2).forEach(sx => enrichLog(`        ${sx}`));
-          });
-          enrichLog("Placing every situation into a region…");
+          enrichLog(`${data.regions} regions found from a sample of ${data.sampled} situations.`);
+          enrichLog("Placing every situation…");
 
-          // Assignment runs as its own request — the whole job together
-          // exceeds Netlify's 30s gateway limit.
-          let guard = 0;
-          while (guard++ < 30) {
+          // Three separate requests: Netlify kills a synchronous function at
+          // 30s, and clustering + assigning + naming together is well past it.
+          let guard = 0, ok = true;
+          while (guard++ < 40) {
             const a = await studioApiJson("/api/discovery-enrich", { job: "assign" });
-            if (a.error) { enrichLog(`ERROR ${a.error}`); break; }
-            if (a.done) {
-              enrichLog("Placed. Final regions:");
-              (a.clusters || []).forEach(c => enrichLog(`   ${String(c.count).padStart(5)}  ${c.name}`));
-              break;
+            if (a.error) { enrichLog(`ERROR ${a.error}`); ok = false; break; }
+            if (a.done) { enrichLog("All situations placed."); break; }
+            enrichLog(`   ${a.remaining} left…`);
+            if (state.enrich.stop) { enrichLog("Stopped. Re-run Build the map."); ok = false; break; }
+            await new Promise(r => setTimeout(r, 200));
+          }
+
+          if (ok) {
+            enrichLog("Naming the regions…");
+            guard = 0;
+            while (guard++ < 12) {
+              const nres = await studioApiJson("/api/discovery-enrich", { job: "name" });
+              if (nres.error) { enrichLog(`ERROR ${nres.error}`); break; }
+              (nres.named || []).forEach(x => {
+                enrichLog(`   ${x.name}`);
+                (x.sample || []).forEach(sx => enrichLog(`        ${sx}`));
+              });
+              (nres.failures || []).forEach(fx => enrichLog(`   naming failed: ${fx.error}`));
+              if (nres.done) {
+                if (nres.clusters) {
+                  enrichLog("Final regions:");
+                  nres.clusters.forEach(c => enrichLog(`   ${String(c.count).padStart(5)}  ${c.name}`));
+                }
+                break;
+              }
+              if (state.enrich.stop) { enrichLog("Stopped mid-naming."); break; }
+              await new Promise(r => setTimeout(r, 200));
             }
-            enrichLog(`   ${a.remaining} situations left to place…`);
-            if (state.enrich.stop) { enrichLog("Stopped mid-assignment — re-run Build the map."); break; }
-            await new Promise(r => setTimeout(r, 250));
           }
           break;
         }
