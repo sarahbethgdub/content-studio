@@ -443,8 +443,17 @@ Rules:
     colour: PALETTE[i % PALETTE.length], piece_count: 0,
   })));
 
-  // Postgres assigns every phrase and rolls each piece up to its modal region.
-  const assigned = await sbRpc("discovery_assign_phrases", {});
+  // Postgres assigns every phrase and rolls each piece up to its modal
+  // region. Batched, because a single statement over the whole set exceeds
+  // the timeout PostgREST applies.
+  await sbRpc("discovery_clear_assignments", {});
+  let assigned = 0;
+  for (let round = 0; round < 20; round++) {
+    const res = await sbRpc("discovery_assign_phrases", { batch_size: 800 });
+    const row = Array.isArray(res) ? res[0] : res;
+    assigned += (row && row.assigned) || 0;
+    if (!row || row.remaining === 0 || !row.assigned) break;
+  }
 
   // Fill in real counts
   const counts = await sbSelectAll("discovery_phrases", { select: "cluster_id" });
