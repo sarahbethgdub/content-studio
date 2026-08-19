@@ -56,21 +56,48 @@ export default async (req) => {
         select: "id,name,blurb", id: `eq.${region}` }))[0];
       if (!cluster) return json({ error: "Unknown region." }, 400, CORS);
 
-      const rows = await sbSelect("pieces", {
-        select: "title,url,category,char_count,reader_note,pull_quote,excerpt,situations",
+      // Browse by SITUATION, not by the piece's modal region. A piece with
+      // four situations may have only one in this region — filing the whole
+      // piece here on that basis produced regions whose contents didn't
+      // match their name. Showing the matching phrase makes the reason
+      // visible, and ranking by how many of a piece's situations landed
+      // here puts the genuinely central ones first.
+      const rows = await sbSelect("discovery_phrases", {
+        select: "phrase,piece_id,pieces(title,url,category,char_count,reader_note,pull_quote)",
         cluster_id: `eq.${region}`,
-        order: "char_count.desc",
-        limit: "12",
+        limit: "400",
       });
 
-      return json({
-        results: rows.map((r) => ({
-          title: r.title, url: r.url, category: r.category, char_count: r.char_count,
-          why: (r.reader_note || r.excerpt || "").slice(0, 320),
-          pull_quote: r.pull_quote || "",
-          situations: r.situations || [],
+      const byPiece = {};
+      for (const r of rows) {
+        const p = r.pieces;
+        if (!p) continue;
+        if (!byPiece[r.piece_id]) {
+          byPiece[r.piece_id] = { piece: p, situations: [] };
+        }
+        byPiece[r.piece_id].situations.push(r.phrase);
+      }
+
+      const results = Object.values(byPiece)
+        .sort((a, b) => b.situations.length - a.situations.length
+                     || (b.piece.char_count || 0) - (a.piece.char_count || 0))
+        .slice(0, 14)
+        .map((x) => ({
+          title: x.piece.title,
+          url: x.piece.url,
+          category: x.piece.category,
+          char_count: x.piece.char_count,
+          // The matching situation is the reason this piece is here, so it
+          // leads. The reader note is background.
+          matched: x.situations.slice(0, 2),
+          why: x.piece.reader_note || "",
+          pull_quote: x.piece.pull_quote || "",
+          situations: x.situations,
           similarity: null,
-        })),
+        }));
+
+      return json({
+        results,
         matched_situation: cluster.name,
         region: { id: cluster.id, name: cluster.name, blurb: cluster.blurb },
         relevance: "region",
