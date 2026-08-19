@@ -271,7 +271,7 @@ async function embedSituations() {
    small; every phrase is then assigned by Postgres via pgvector, which
    keeps 2,400 x 1536 floats out of this function entirely.
    --------------------------------------------------------------------- */
-const CLUSTER_SAMPLE = 900;
+const CLUSTER_SAMPLE = 600;   // 600 x 1536 floats is ~10MB; 900 was ~15MB and too slow
 
 function toUnitVectors(list) {
   const dim = list[0].length;
@@ -293,15 +293,26 @@ function dot(flat, dim, i, centroid) {
   return acc;
 }
 
+const PALETTE = ["#CCA33E","#4E7A9B","#8A6BA8","#5B8C6E","#B5713F","#A0526D","#3F7C77",
+                 "#7A6A3F","#5C6BA8","#9B5B4E","#4E8C9B","#8C7A3F","#6E5B8C","#3F7C5B",
+                 "#A8794E","#5B7C8C","#8C5B6E","#6E8C5B"];
+
+/* ---------------------------------------------------------------------
+   STAGE 1 of 3 — find the regions.
+   Netlify's gateway kills a synchronous function at 30 seconds, and
+   sampling + k-means + 18 Claude calls + 2,673 writes is well past that.
+   So: cluster here, assign in stage 2, name in stage 3 — by which point
+   representative phrases can be fetched as plain text rather than
+   carried through as vectors.
+   --------------------------------------------------------------------- */
 async function buildClusters(k = 18) {
   const sample = await sbRpc("discovery_phrase_sample", { sample_size: CLUSTER_SAMPLE });
   if (!sample || sample.length < k * 8) {
-    throw new Error(`only ${sample ? sample.length : 0} embedded phrases — run the phrases job first`);
+    throw new Error(`only ${sample ? sample.length : 0} embedded phrases — run Extract situations first`);
   }
 
   const { flat, dim, n } = toUnitVectors(sample.map((r) => parseVector(r.embedding)));
 
-  // k-means++ seeding, deterministic
   let seed = 20260819;
   const rnd = () => (seed = (seed * 16807) % 2147483647) / 2147483647;
   const centroids = [];
@@ -319,7 +330,7 @@ async function buildClusters(k = 18) {
   }
 
   const assign = new Int16Array(n).fill(-1);
-  for (let iter = 0; iter < 18; iter++) {
+  for (let iter = 0; iter < 16; iter++) {
     let moved = 0;
     for (let i = 0; i < n; i++) {
       let best = 0, bestSim = -2;
@@ -348,22 +359,78 @@ async function buildClusters(k = 18) {
     if (!moved) break;
   }
 
-  // Representative phrases per cluster, for naming
-  const byCluster = [];
-  for (let c = 0; c < k; c++) byCluster.push([]);
-  for (let i = 0; i < n; i++) {
-    byCluster[assign[i]].push({ id: sample[i].id, sim: dot(flat, dim, i, centroids[assign[i]]) });
+  const populated = [];
+  for (let c = 0; c < k; c++) {
+    let size = 0;
+    for (let i = 0; i < n; i++) if (assign[i] === c) size++;
+    if (size >= 3) populated.push(c);
   }
 
-  const ids = byCluster.flatMap((rows) =>
-    rows.sort((a, b) => b.sim - a.sim).slice(0, 26).map((r) => r.id));
-  const textRows = ids.length
-    ? await sbSelect("discovery_phrases", { select: "id,phrase", id: `in.(${ids.join(",")})` })
-    : [];
-  const textById = {};
-  for (const r of textRows) textById[r.id] = r.phrase;
+  // 2D layout: dissimilar regions pushed apart
+  const pts = populated.map((_, i) => ({
+    x: 0.5 + 0.34 * Math.cos((i / populated.length) * Math.PI * 2),
+    y: 0.5 + 0.32 * Math.sin((i / populated.length) * Math.PI * 2),
+  }));
+  for (let step = 0; step < 500; step++) {
+    for (let a = 0; a < populated.length; a++) for (let b = a + 1; b < populated.length; b++) {
+      let sim = 0;
+      const ca = centroids[populated[a]], cb = centroids[populated[b]];
+      for (let j = 0; j < dim; j++) sim += ca[j] * cb[j];
+      const want = Math.max(0.24, 1 - sim);
+      const dx = pts[b].x - pts[a].x, dy = pts[b].y - pts[a].y;
+      const dist = Math.hypot(dx, dy) || 1e-6;
+      const push = (want * 0.58 - dist) * 0.04;
+      pts[a].x -= (dx / dist) * push; pts[a].y -= (dy / dist) * push;
+      pts[b].x += (dx / dist) * push; pts[b].y += (dy / dist) * push;
+    }
+  }
+  const xs = pts.map((p) => p.x), ys = pts.map((p) => p.y);
+  const nx = (v) => 0.10 + 0.80 * (v - Math.min(...xs)) / ((Math.max(...xs) - Math.min(...xs)) || 1);
+  const ny = (v) => 0.14 + 0.72 * (v - Math.min(...ys)) / ((Math.max(...ys) - Math.min(...ys)) || 1);
 
-  const NAME_SYSTEM = `You label regions of a library so a reader can tell, at a glance, whether what they are dealing with lives there.
+  await sbRpc("discovery_clear_assignments", {});
+  await fetch(`${process.env.SUPABASE_URL}/rest/v1/discovery_clusters?id=gt.0`, {
+    method: "DELETE",
+    headers: { apikey: process.env.SUPABASE_SERVICE_KEY,
+               Authorization: `Bearer ${process.env.SUPABASE_SERVICE_KEY}`,
+               "Content-Profile": "content_studio" },
+  });
+
+  await sbInsert("discovery_clusters", populated.map((c, i) => ({
+    name: `Region ${i + 1}`,          // placeholder; stage 3 names it properly
+    blurb: null,
+    centroid: Array.from(centroids[c]),
+    x: nx(pts[i].x), y: ny(pts[i].y),
+    colour: PALETTE[i % PALETTE.length], piece_count: 0,
+  })));
+
+  return { stage: "clustered", regions: populated.length, sampled: n, next: "assign" };
+}
+
+/* STAGE 2 of 3 — place every situation. Batched; call until done. */
+async function assignPhrases() {
+  const res = await sbRpc("discovery_assign_phrases", { batch_size: 700 });
+  const row = Array.isArray(res) ? res[0] : res;
+  const remaining = (row && row.remaining) || 0;
+
+  if (remaining > 0) {
+    return { stage: "assigning", assigned: (row && row.assigned) || 0, remaining,
+             done: false, next: "assign" };
+  }
+
+  const counts = await sbSelectAll("discovery_phrases", { select: "cluster_id" });
+  const tally = {};
+  for (const r of counts) if (r.cluster_id) tally[r.cluster_id] = (tally[r.cluster_id] || 0) + 1;
+  const clusters = await sbSelect("discovery_clusters", { select: "id" });
+  for (const c of clusters) {
+    await sbPatch("discovery_clusters", { id: `eq.${c.id}` }, { piece_count: tally[c.id] || 0 });
+  }
+
+  return { stage: "assigned", done: true, remaining: 0, next: "name" };
+}
+
+/* STAGE 3 of 3 — name each region from the situations that landed in it. */
+const NAME_SYSTEM = `You label regions of a library so a reader can tell, at a glance, whether what they are dealing with lives there.
 
 You will be shown SITUATIONS — short phrases describing what a reader is going through. They all belong to one region.
 
@@ -391,101 +458,42 @@ Rules:
 - Blurb: one sentence to the reader naming what they're trying to work out.
 - Return JSON only.`;
 
-  const named = await Promise.all(byCluster.map(async (rows, c) => {
-    if (rows.length < 3) return null;
-    const phrases = rows.slice(0, 26).map((r) => textById[r.id]).filter(Boolean);
-    if (phrases.length < 3) return null;
+async function nameClusters() {
+  const clusters = await sbSelect("discovery_clusters", {
+    select: "id,name,piece_count", order: "id.asc",
+  });
+  const todo = clusters.filter((c) => /^Region \d+$/.test(c.name || ""));
+  if (!todo.length) {
+    return { stage: "done", done: true,
+             clusters: clusters.map((c) => ({ name: c.name, count: c.piece_count }))
+                               .sort((a, b) => b.count - a.count) };
+  }
+
+  const batch = todo.slice(0, 6);   // 6 Claude calls in parallel fits the window
+  const results = await Promise.allSettled(batch.map(async (c) => {
+    const rows = await sbSelect("discovery_phrases", {
+      select: "phrase", cluster_id: `eq.${c.id}`, limit: "26",
+    });
+    const phrases = rows.map((r) => r.phrase).filter(Boolean);
+    if (phrases.length < 3) {
+      await sbPatch("discovery_clusters", { id: `eq.${c.id}` },
+                    { name: "Everything else", blurb: "A handful of pieces that don't group with the rest." });
+      return { id: c.id, name: "Everything else" };
+    }
     const out = parseJson(await claude(NAME_SYSTEM,
       `Situations in this region:\n\n${phrases.map((p) => "- " + p).join("\n")}\n\n` +
       `Return: {"name": "...", "blurb": "..."}`, 300));
-    return { c, name: out.name, blurb: out.blurb, sample: phrases.slice(0, 3) };
+    await sbPatch("discovery_clusters", { id: `eq.${c.id}` },
+                  { name: out.name, blurb: out.blurb });
+    return { id: c.id, name: out.name, sample: phrases.slice(0, 2) };
   }));
 
-  const live = named.filter(Boolean);
+  const named = results.filter((r) => r.status === "fulfilled").map((r) => r.value);
+  const failures = results.filter((r) => r.status === "rejected")
+                          .map((r) => ({ error: String(r.reason).slice(0, 140) }));
 
-  // 2D layout: push dissimilar regions apart
-  const pts = live.map((_, i) => ({
-    x: 0.5 + 0.34 * Math.cos((i / live.length) * Math.PI * 2),
-    y: 0.5 + 0.32 * Math.sin((i / live.length) * Math.PI * 2),
-  }));
-  for (let step = 0; step < 600; step++) {
-    for (let a = 0; a < live.length; a++) for (let b = a + 1; b < live.length; b++) {
-      let sim = 0;
-      const ca = centroids[live[a].c], cb = centroids[live[b].c];
-      for (let j = 0; j < dim; j++) sim += ca[j] * cb[j];
-      const want = Math.max(0.24, 1 - sim);
-      const dx = pts[b].x - pts[a].x, dy = pts[b].y - pts[a].y;
-      const dist = Math.hypot(dx, dy) || 1e-6;
-      const push = (want * 0.58 - dist) * 0.04;
-      pts[a].x -= (dx / dist) * push; pts[a].y -= (dy / dist) * push;
-      pts[b].x += (dx / dist) * push; pts[b].y += (dy / dist) * push;
-    }
-  }
-  const xs = pts.map((p) => p.x), ys = pts.map((p) => p.y);
-  const nx = (v) => 0.10 + 0.80 * (v - Math.min(...xs)) / ((Math.max(...xs) - Math.min(...xs)) || 1);
-  const ny = (v) => 0.14 + 0.72 * (v - Math.min(...ys)) / ((Math.max(...ys) - Math.min(...ys)) || 1);
-
-  const PALETTE = ["#CCA33E","#4E7A9B","#8A6BA8","#5B8C6E","#B5713F","#A0526D","#3F7C77",
-                   "#7A6A3F","#5C6BA8","#9B5B4E","#4E8C9B","#8C7A3F","#6E5B8C","#3F7C5B",
-                   "#A8794E","#5B7C8C","#8C5B6E","#6E8C5B"];
-
-  await fetch(`${process.env.SUPABASE_URL}/rest/v1/discovery_clusters?id=gt.0`, {
-    method: "DELETE",
-    headers: { apikey: process.env.SUPABASE_SERVICE_KEY,
-               Authorization: `Bearer ${process.env.SUPABASE_SERVICE_KEY}`,
-               "Content-Profile": "content_studio" },
-  });
-
-  const inserted = await sbInsert("discovery_clusters", live.map((r, i) => ({
-    name: r.name, blurb: r.blurb,
-    centroid: Array.from(centroids[r.c]),
-    x: nx(pts[i].x), y: ny(pts[i].y),
-    colour: PALETTE[i % PALETTE.length], piece_count: 0,
-  })));
-
-  // Assignment happens in its own request. Netlify's gateway gives a
-  // synchronous function 30 seconds; sampling + k-means + 18 Claude calls
-  // already uses most of that, so writing 2,673 assignments on top of it
-  // does not fit. The panel chains the next call.
-  await sbRpc("discovery_clear_assignments", {});
-
-  return {
-    stage: "named",
-    clusters: inserted.map((row, i) => ({ name: row.name, sample: live[i].sample })),
-    sampled: n,
-    next: "assign",
-  };
-}
-
-/* Assign phrases to the regions just created. Batched; call until done. */
-async function assignPhrases() {
-  const res = await sbRpc("discovery_assign_phrases", { batch_size: 700 });
-  const row = Array.isArray(res) ? res[0] : res;
-  const remaining = (row && row.remaining) || 0;
-
-  if (remaining > 0) {
-    return { stage: "assigning", assigned: (row && row.assigned) || 0,
-             remaining, done: false, next: "assign" };
-  }
-
-  // Everything placed — write the real counts onto each region.
-  const counts = await sbSelectAll("discovery_phrases", { select: "cluster_id" });
-  const tally = {};
-  for (const r of counts) if (r.cluster_id) tally[r.cluster_id] = (tally[r.cluster_id] || 0) + 1;
-
-  const clusters = await sbSelect("discovery_clusters", { select: "id,name" });
-  for (const c of clusters) {
-    await sbPatch("discovery_clusters", { id: `eq.${c.id}` }, { piece_count: tally[c.id] || 0 });
-  }
-
-  return {
-    stage: "done",
-    done: true,
-    assigned: (row && row.assigned) || 0,
-    remaining: 0,
-    clusters: clusters.map((c) => ({ name: c.name, count: tally[c.id] || 0 }))
-                      .sort((a, b) => b.count - a.count),
-  };
+  return { stage: "naming", done: todo.length <= batch.length,
+           named, failures, remaining: todo.length - batch.length, next: "name" };
 }
 
 export default async (req) => {
@@ -505,6 +513,7 @@ export default async (req) => {
     if (job === "situations") return json(await embedSituations());
     if (job === "clusters")   return json(await buildClusters(Math.min(30, Math.max(4, body.k || 18))));
     if (job === "assign")     return json(await assignPhrases());
+    if (job === "name")       return json(await nameClusters());
     return json({ error: `unknown job: ${job}` }, 400);
   } catch (e) {
     return json({ error: String(e).slice(0, 400) }, 500);
